@@ -1,0 +1,30 @@
+# Environment / secrets
+.env
+.env.*
+*.env
+keys.txt
+*_key.txt
+*_keys.txt
+
+# TypeScript build artifacts
+typescript/dist/
+typescript/node_modules/
+typescript/*.tgz
+typescript/coverage/
+typescript/*.log
+
+# Python build artifacts
+python/dist/
+python/build/
+python/*.egg-info/
+python/.venv/
+python/venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+.vscode/
