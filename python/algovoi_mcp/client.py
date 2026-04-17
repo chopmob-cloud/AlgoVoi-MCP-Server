@@ -25,19 +25,32 @@ from urllib.error import URLError
 
 # Public indexer base URLs (no auth needed).
 # Native token networks share the same indexer as their parent chain.
+# Testnet networks share the same indexer key pattern with _testnet suffix.
 _INDEXERS: dict[str, str] = {
+    # Mainnet
     "algorand_mainnet": "https://mainnet-idx.algonode.cloud/v2",
     "voi_mainnet":      "https://mainnet-idx.voi.nodely.dev/v2",
     "hedera_mainnet":   "https://mainnet-public.mirrornode.hedera.com/api/v1",
     "stellar_mainnet":  "https://horizon.stellar.org",
+    # Testnet
+    "algorand_testnet": "https://testnet-idx.algonode.cloud/v2",
+    "voi_testnet":      "https://testnet-idx.voi.nodely.dev/v2",
+    "hedera_testnet":   "https://testnet.mirrornode.hedera.com/api/v1",
+    "stellar_testnet":  "https://horizon-testnet.stellar.org",
 }
 
-# USDC asset IDs per network (parent-chain keys only).
+# USDC asset IDs per network (parent-chain keys only — omitting a key skips asset-id check).
 _USDC_ASSET: dict[str, Any] = {
+    # Mainnet
     "algorand_mainnet": 31566704,
     "voi_mainnet":      302190,
     "hedera_mainnet":   "0.0.456858",
     "stellar_mainnet":  "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    # Testnet
+    "algorand_testnet": 10458941,
+    # "voi_testnet": asset ID varies — check skipped until standardised
+    "hedera_testnet":   "0.0.4279119",
+    "stellar_testnet":  "USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
 }
 
 import re as _re
@@ -322,12 +335,12 @@ class AlgoVoiClient:
                             "amount": transfer.get("amount")}
             return {"verified": False, "error": "payment to payout address not found"}
         # USDC HTS path — check token_transfers.
-        expected_token = _USDC_ASSET.get("hedera_mainnet", "0.0.456858")
+        expected_token = _USDC_ASSET.get(_indexer_key(network))
         for transfer in tx.get("token_transfers", []):
-            if transfer.get("token_id") != expected_token:
+            if expected_token and transfer.get("token_id") != expected_token:
                 continue
             if transfer.get("account") == payout and int(transfer.get("amount", 0)) > 0:
-                return {"verified": True, "tx_id": tx_id, "network": "hedera_mainnet",
+                return {"verified": True, "tx_id": tx_id, "network": network,
                         "amount": transfer.get("amount")}
         return {"verified": False, "error": "payment to payout address not found"}
 
@@ -355,14 +368,14 @@ class AlgoVoiClient:
                 return {"verified": True, "tx_id": tx_id, "network": network,
                         "amount": amt, "payer": op.get("from")}
             # USDC path.
-            asset_str = str(_USDC_ASSET.get("stellar_mainnet", "USDC:"))
+            asset_str = str(_USDC_ASSET.get(_indexer_key(network), "USDC:"))
             parts = asset_str.split(":", 1)
             expected_code = parts[0]
             expected_issuer = parts[1] if len(parts) > 1 else ""
             if op.get("asset_code") != expected_code or op.get("asset_issuer") != expected_issuer:
                 continue
             amt = int(float(op.get("amount", "0")) * 1_000_000)
-            return {"verified": True, "tx_id": tx_id, "network": "stellar_mainnet",
+            return {"verified": True, "tx_id": tx_id, "network": network,
                     "amount": amt, "payer": op.get("from")}
         return {"verified": False, "error": "payment to payout address not found"}
 

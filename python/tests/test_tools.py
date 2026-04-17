@@ -428,9 +428,9 @@ class TestVerifyWebhook:
 # ── list_networks (2 tests) ───────────────────────────────────────────────────
 
 class TestListNetworks:
-    def test_eight_networks(self):
+    def test_sixteen_networks(self):
         out = server.tool_list_networks(ListNetworksInput())
-        assert len(out["networks"]) == 8
+        assert len(out["networks"]) == 16
 
     def test_caip2_and_asset_id(self):
         out = server.tool_list_networks(ListNetworksInput())
@@ -549,7 +549,7 @@ class TestDispatcher:
     def test_list_networks_via_dispatch(self):
         c = make_client()
         out = server._dispatch(c, None, "list_networks", {})
-        assert len(out["networks"]) == 8
+        assert len(out["networks"]) == 16
 
     def test_dispatch_redacts(self):
         c = make_client()

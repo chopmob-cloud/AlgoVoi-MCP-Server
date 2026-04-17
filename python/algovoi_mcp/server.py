@@ -385,7 +385,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "amount":   {"type": "number"},
                 "currency": {"type": "string"},
                 "label":    {"type": "string"},
-                "network":  {"type": "string", "enum": ["algorand_mainnet", "voi_mainnet", "algorand_mainnet_algo", "voi_mainnet_voi"]},
+                "network":  {"type": "string", "enum": ["algorand_mainnet", "voi_mainnet", "algorand_mainnet_algo", "voi_mainnet_voi", "algorand_testnet", "voi_testnet", "algorand_testnet_algo", "voi_testnet_voi"]},
             },
             "required":             ["amount", "currency", "label", "network"],
             "additionalProperties": False,

@@ -4,7 +4,7 @@ AlgoVoi MCP Server — Thorough Smoke Test
 
 Phase 1 — Offline tool calls (no network to AlgoVoi API):
   01  tools/list — all 11 tools present
-  02  list_networks — 8 networks (4 stablecoin + 4 native), correct CAIP-2 + asset IDs
+  02  list_networks — 16 networks (8 mainnet + 8 testnet), correct CAIP-2 + asset IDs
   03  generate_mpp_challenge — 402 + WWW-Authenticate shape
   04  generate_x402_challenge — 402 + X-Payment-Required decodable
   05  generate_ap2_mandate — mandate_id len 16, mandate_b64 round-trips
@@ -254,25 +254,31 @@ def run_phase1(session: McpSession, label: str) -> int:
         fail(f"[{label}] 01 tools/list — expected {sorted(EXPECTED)}, got {sorted(names)}")
         failures += 1
 
-    # 02 — list_networks (4 stablecoin + 4 native = 8 total)
+    # 02 — list_networks (8 mainnet + 8 testnet = 16 total)
     out = session.call_tool("list_networks")
     nets = out.get("networks", [])
     keys = {n["key"] for n in nets}
     expected_keys = {
+        # Mainnet
         "algorand_mainnet", "voi_mainnet", "hedera_mainnet", "stellar_mainnet",
         "algorand_mainnet_algo", "voi_mainnet_voi", "hedera_mainnet_hbar", "stellar_mainnet_xlm",
+        # Testnet
+        "algorand_testnet", "voi_testnet", "hedera_testnet", "stellar_testnet",
+        "algorand_testnet_algo", "voi_testnet_voi", "hedera_testnet_hbar", "stellar_testnet_xlm",
     }
-    if len(nets) == 8 and expected_keys <= keys and all("caip2" in n and "asset_id" in n for n in nets):
+    if len(nets) == 16 and expected_keys <= keys and all("caip2" in n and "asset_id" in n for n in nets):
         algo = next((n for n in nets if n["key"] == "algorand_mainnet"), None)
         algo_native = next((n for n in nets if n["key"] == "algorand_mainnet_algo"), None)
+        algo_testnet = next((n for n in nets if n["key"] == "algorand_testnet"), None)
         if (algo and algo["asset_id"] == "31566704" and algo["caip2"] == "algorand:mainnet"
-                and algo_native and algo_native["asset_id"] is None and algo_native["asset"] == "ALGO"):
-            ok(f"[{label}] 02 list_networks — 8 networks (4 stablecoin + 4 native), correct CAIP-2 + asset IDs")
+                and algo_native and algo_native["asset_id"] is None and algo_native["asset"] == "ALGO"
+                and algo_testnet and algo_testnet["caip2"] == "algorand:testnet"):
+            ok(f"[{label}] 02 list_networks — 16 networks (8 mainnet + 8 testnet), correct CAIP-2 + asset IDs")
         else:
-            fail(f"[{label}] 02 list_networks — network fields wrong: algo={algo} algo_native={algo_native}")
+            fail(f"[{label}] 02 list_networks — network fields wrong: algo={algo} algo_native={algo_native} algo_testnet={algo_testnet}")
             failures += 1
     else:
-        fail(f"[{label}] 02 list_networks — unexpected shape: {out}")
+        fail(f"[{label}] 02 list_networks — unexpected shape (got {len(nets)} networks): {out}")
         failures += 1
 
     # 03 — generate_mpp_challenge

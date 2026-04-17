@@ -18,10 +18,17 @@ from .networks import NETWORKS
 _STRICT = ConfigDict(strict=True, extra="forbid")
 
 NetworkLiteral  = Literal[
+    # Mainnet
     "algorand_mainnet", "voi_mainnet", "hedera_mainnet", "stellar_mainnet",
     "algorand_mainnet_algo", "voi_mainnet_voi", "hedera_mainnet_hbar", "stellar_mainnet_xlm",
+    # Testnet
+    "algorand_testnet", "voi_testnet", "hedera_testnet", "stellar_testnet",
+    "algorand_testnet_algo", "voi_testnet_voi", "hedera_testnet_hbar", "stellar_testnet_xlm",
 ]
-ExtNetworkLiteral = Literal["algorand_mainnet", "voi_mainnet", "algorand_mainnet_algo", "voi_mainnet_voi"]
+ExtNetworkLiteral = Literal[
+    "algorand_mainnet", "voi_mainnet", "algorand_mainnet_algo", "voi_mainnet_voi",
+    "algorand_testnet", "voi_testnet", "algorand_testnet_algo", "voi_testnet_voi",
+]
 
 
 class CreatePaymentLinkInput(BaseModel):
@@ -125,6 +132,10 @@ SCHEMAS_BY_TOOL: dict[str, type[BaseModel]] = {
 _EXPECTED = set(SCHEMAS_BY_TOOL.keys())
 assert len(_EXPECTED) == 11, f"expected 11 tool schemas, got {len(_EXPECTED)}"
 # Cross-check each schema's network fields against the canonical NETWORKS tuple.
-for _n in ("algorand_mainnet", "voi_mainnet", "hedera_mainnet", "stellar_mainnet",
-           "algorand_mainnet_algo", "voi_mainnet_voi", "hedera_mainnet_hbar", "stellar_mainnet_xlm"):
+for _n in (
+    "algorand_mainnet", "voi_mainnet", "hedera_mainnet", "stellar_mainnet",
+    "algorand_mainnet_algo", "voi_mainnet_voi", "hedera_mainnet_hbar", "stellar_mainnet_xlm",
+    "algorand_testnet", "voi_testnet", "hedera_testnet", "stellar_testnet",
+    "algorand_testnet_algo", "voi_testnet_voi", "hedera_testnet_hbar", "stellar_testnet_xlm",
+):
     assert _n in NETWORKS, f"network {_n!r} not in networks.NETWORKS"

@@ -522,8 +522,8 @@ describe("verifyWebhook", () => {
 // ── list_networks (2 tests) ───────────────────────────────────────────────────
 
 describe("listNetworks", () => {
-  it("returns 8 networks", () => {
-    expect(listNetworks().networks).toHaveLength(8);
+  it("returns 16 networks (8 mainnet + 8 testnet)", () => {
+    expect(listNetworks().networks).toHaveLength(16);
   });
   it("includes CAIP-2 and asset_id", () => {
     const out = listNetworks();

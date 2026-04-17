@@ -13,11 +13,18 @@
 
 // Public indexer base URLs (no auth needed).
 // Native token networks share the same indexer as their parent chain.
+// Testnet networks share the same indexer key pattern with _testnet suffix.
 const INDEXERS: Record<string, string> = {
+  // Mainnet
   algorand_mainnet: "https://mainnet-idx.algonode.cloud/v2",
   voi_mainnet:      "https://mainnet-idx.voi.nodely.dev/v2",
   hedera_mainnet:   "https://mainnet-public.mirrornode.hedera.com/api/v1",
   stellar_mainnet:  "https://horizon.stellar.org",
+  // Testnet
+  algorand_testnet: "https://testnet-idx.algonode.cloud/v2",
+  voi_testnet:      "https://testnet-idx.voi.nodely.dev/v2",
+  hedera_testnet:   "https://testnet.mirrornode.hedera.com/api/v1",
+  stellar_testnet:  "https://horizon-testnet.stellar.org",
 };
 
 /** Strip native-coin suffix to get the parent chain indexer key. */
@@ -30,12 +37,18 @@ function isNativeNetwork(norm: string): boolean {
   return /_(algo|voi|hbar|xlm)$/.test(norm);
 }
 
-// USDC asset IDs per network.
+// USDC asset IDs per network (parent-chain keys only — omitting a key skips asset-id check).
 const USDC_ASSET: Record<string, string | number> = {
+  // Mainnet
   algorand_mainnet: 31566704,
   voi_mainnet:      302190,
   hedera_mainnet:   "0.0.456858",
   stellar_mainnet:  "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  // Testnet
+  algorand_testnet: 10458941,
+  // voi_testnet: asset ID varies — check skipped until standardised
+  hedera_testnet:   "0.0.4279119",
+  stellar_testnet:  "USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
 };
 
 export interface AlgoVoiClientConfig {
@@ -381,7 +394,7 @@ export class AlgoVoiClient {
     }
 
     // USDC HTS path — check token_transfers.
-    const expectedToken = USDC_ASSET["hedera_mainnet"] as string;
+    const expectedToken = USDC_ASSET[indexerKey(network)] as string;
     const transfers = (tx.token_transfers ?? []) as Record<string, unknown>[];
     for (const t of transfers) {
       if (t.token_id !== expectedToken) continue;
@@ -407,7 +420,7 @@ export class AlgoVoiClient {
     const native = isNativeNetwork(network);
 
     if (!native) {
-      const asset = USDC_ASSET["stellar_mainnet"] as string;
+      const asset = USDC_ASSET[indexerKey(network)] as string;
       const [expectedCode, expectedIssuer] = asset.split(":");
       for (const op of records) {
         if (op.type !== "payment") continue;

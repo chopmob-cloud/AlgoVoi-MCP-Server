@@ -166,6 +166,7 @@ export function listNetworks() {
 // ── 6. generate_mpp_challenge ─────────────────────────────────────────────────
 
 const CAIP2: Record<string, string> = {
+  // Mainnet
   algorand_mainnet:      "algorand:mainnet",
   voi_mainnet:           "voi:mainnet",
   hedera_mainnet:        "hedera:mainnet",
@@ -174,6 +175,15 @@ const CAIP2: Record<string, string> = {
   voi_mainnet_voi:       "voi:mainnet",
   hedera_mainnet_hbar:   "hedera:mainnet",
   stellar_mainnet_xlm:   "stellar:pubnet",
+  // Testnet
+  algorand_testnet:      "algorand:testnet",
+  voi_testnet:           "voi:testnet",
+  hedera_testnet:        "hedera:testnet",
+  stellar_testnet:       "stellar:testnet",
+  algorand_testnet_algo: "algorand:testnet",
+  voi_testnet_voi:       "voi:testnet",
+  hedera_testnet_hbar:   "hedera:testnet",
+  stellar_testnet_xlm:   "stellar:testnet",
 };
 
 export function generateMppChallenge(
@@ -409,7 +419,7 @@ export const TOOL_SCHEMAS = [
         amount:   { type: "number" },
         currency: { type: "string" },
         label:    { type: "string" },
-        network:  { type: "string", enum: ["algorand_mainnet", "voi_mainnet", "algorand_mainnet_algo", "voi_mainnet_voi"] },
+        network:  { type: "string", enum: ["algorand_mainnet", "voi_mainnet", "algorand_mainnet_algo", "voi_mainnet_voi", "algorand_testnet", "voi_testnet", "algorand_testnet_algo", "voi_testnet_voi"] },
       },
       required: ["amount", "currency", "label", "network"],
       additionalProperties: false,
