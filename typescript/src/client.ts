@@ -212,7 +212,7 @@ export class AlgoVoiClient {
       return { paid: false, status: "invalid_token" };
     }
     const safe = encodeURIComponent(token);
-    const resp = await fetch(`${this.cfg.apiBase}/checkout/${safe}`);
+    const resp = await fetch(`${this.cfg.apiBase}/checkout/${safe}/status`);
     if (!resp.ok) {
       return { paid: false, status: `http_${resp.status}` };
     }

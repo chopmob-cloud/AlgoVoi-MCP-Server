@@ -208,7 +208,7 @@ class AlgoVoiClient:
         """Call the hosted-checkout status endpoint."""
         if not token or len(token) > 200:
             return {"status": "invalid_token", "paid": False, "raw": {}}
-        url = f"{self.api_base}/checkout/{quote(token, safe='')}"
+        url = f"{self.api_base}/checkout/{quote(token, safe='')}/status"
         try:
             req = Request(url, method="GET")
             with urlopen(req, timeout=15, context=self._ssl_ctx) as resp:  # noqa: S310
