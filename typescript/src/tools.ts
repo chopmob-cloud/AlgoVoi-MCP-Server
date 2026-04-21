@@ -380,16 +380,21 @@ export const TOOL_SCHEMAS = [
   {
     name: "create_payment_link",
     description:
-      "Create a hosted AlgoVoi checkout URL for a given amount and chain. Returns a short token and public URL the customer can visit to pay in USDC or native tokens (Algorand / VOI / Hedera / Stellar).",
+      "Create a hosted AlgoVoi checkout URL for a given amount and chain. " +
+      "Use this when the customer will pay via a hosted checkout page (redirect flow). " +
+      "For in-page browser-wallet flows use prepare_extension_payment instead. " +
+      "For machine-to-machine agent payments use generate_mpp_challenge, generate_x402_challenge, or generate_ap2_mandate. " +
+      "Returns a short token and public URL the customer visits to pay in USDC or native tokens (Algorand / VOI / Hedera / Stellar). " +
+      "After payment, verify settlement with verify_payment.",
     inputSchema: {
       type: "object",
       properties: {
-        amount:   { type: "number", description: "Payment amount in fiat units (e.g. 5.00 for $5.00)." },
-        currency: { type: "string", description: "ISO currency code — e.g. USD, GBP, EUR." },
-        label:    { type: "string", description: 'Short order label (e.g. "Order #123").' },
-        network:  { type: "string", enum: [...NETWORKS], description: "Preferred blockchain network." },
-        redirect_url:    { type: "string", description: "https URL to return the customer to after payment (optional)." },
-        idempotency_key: { type: "string", description: "16–64 char token — duplicate calls within 24h return the same checkout URL." },
+        amount:   { type: "number",  description: "Payment amount in fiat major units (e.g. 5.00 for $5.00 USD). Converted to on-chain micro-units automatically." },
+        currency: { type: "string",  description: "ISO 4217 currency code — e.g. USD, GBP, EUR. Determines the fiat price shown to the customer." },
+        label:    { type: "string",  description: 'Short order label shown on the checkout page (e.g. "Order #123" or "Premium access — 30 days").' },
+        network:  { type: "string",  enum: [...NETWORKS], description: "Blockchain network the customer will pay on. Use list_networks to see all supported options." },
+        redirect_url:    { type: "string", description: "Optional HTTPS URL to redirect the customer to after a successful payment." },
+        idempotency_key: { type: "string", description: "Optional 16–64 char client-generated token. Duplicate calls with the same key within 24 h return the original checkout URL without creating a new link." },
       },
       required: ["amount", "currency", "label", "network"],
       additionalProperties: false,
@@ -412,14 +417,18 @@ export const TOOL_SCHEMAS = [
   {
     name: "prepare_extension_payment",
     description:
-      "Prepare an in-page wallet-extension payment (Algorand / VOI only). Returns the token and chain parameters a frontend can use to ask a browser wallet to sign and submit the transfer, then verify with verify_payment + tx_id.",
+      "Prepare an in-page browser-wallet payment for Algorand or VOI (AVM chains only — not Hedera or Stellar). " +
+      "Use this instead of create_payment_link when the user already has a browser wallet extension (e.g. Defly, Pera, Kibisis) " +
+      "and you want the payment to happen in-page without a redirect. " +
+      "Returns the checkout token, chain parameters, and asset details the frontend needs to call the wallet's sign-and-submit API. " +
+      "After the wallet submits the transaction, verify settlement with verify_payment providing both the token and the on-chain tx_id.",
     inputSchema: {
       type: "object",
       properties: {
-        amount:   { type: "number" },
-        currency: { type: "string" },
-        label:    { type: "string" },
-        network:  { type: "string", enum: ["algorand_mainnet", "voi_mainnet", "algorand_mainnet_algo", "voi_mainnet_voi", "algorand_testnet", "voi_testnet", "algorand_testnet_algo", "voi_testnet_voi"] },
+        amount:   { type: "number",  description: "Payment amount in fiat major units (e.g. 5.00 for $5.00 USD). Converted to on-chain micro-units automatically." },
+        currency: { type: "string",  description: "ISO 4217 currency code — e.g. USD, GBP, EUR." },
+        label:    { type: "string",  description: 'Short label describing the payment (e.g. "Order #123"). Shown to the user in the wallet approval dialog.' },
+        network:  { type: "string",  enum: ["algorand_mainnet", "voi_mainnet", "algorand_mainnet_algo", "voi_mainnet_voi", "algorand_testnet", "voi_testnet", "algorand_testnet_algo", "voi_testnet_voi"], description: "AVM network to pay on. Use algorand_mainnet or voi_mainnet for USDC; algorand_mainnet_algo or voi_mainnet_voi for native tokens." },
       },
       required: ["amount", "currency", "label", "network"],
       additionalProperties: false,
@@ -468,13 +477,17 @@ export const TOOL_SCHEMAS = [
   {
     name: "verify_mpp_receipt",
     description:
-      "Verify an MPP receipt (on-chain transaction ID) for a given resource — returns {verified: true} if the transaction paid the resource's declared amount to the tenant's payout address.",
+      "Verify an MPP (IETF draft-ryan-httpauth-payment) receipt after a client has paid a challenge. " +
+      "Use this after generate_mpp_challenge: once the client re-sends the request with a payment transaction ID, " +
+      "call this tool to confirm the on-chain transaction paid the correct amount to the tenant's payout address. " +
+      "Returns {verified: true} on success. For x402-protocol flows use verify_x402_proof instead; " +
+      "for hosted checkout flows use verify_payment instead.",
     inputSchema: {
       type: "object",
       properties: {
-        resource_id: { type: "string" },
-        tx_id:       { type: "string" },
-        network:     { type: "string", enum: [...NETWORKS] },
+        resource_id: { type: "string", description: "The resource_id originally passed to generate_mpp_challenge — links the transaction to the specific gated resource." },
+        tx_id:       { type: "string", description: "On-chain transaction ID provided by the client in the X-Payment header or equivalent." },
+        network:     { type: "string", enum: [...NETWORKS], description: "Blockchain network the transaction was submitted on. Must match the network in the original challenge." },
       },
       required: ["resource_id", "tx_id", "network"],
       additionalProperties: false,
@@ -483,12 +496,17 @@ export const TOOL_SCHEMAS = [
   {
     name: "verify_x402_proof",
     description:
-      "Verify a base64-encoded x402 payment proof against a given network — returns {verified: true} if the proof corresponds to a confirmed on-chain transfer to the tenant's payout address.",
+      "Verify a base64-encoded x402 (HTTP 402) payment proof from a client's X-Payment request header. " +
+      "Use this after generate_x402_challenge: the client pays on-chain and re-sends the request with " +
+      "X-Payment: <base64-proof>; pass that header value here to confirm the payment. " +
+      "Returns {verified: true} if the proof corresponds to a confirmed on-chain transfer of the correct amount " +
+      "to the tenant's payout address. For MPP-protocol flows use verify_mpp_receipt; " +
+      "for hosted checkout flows use verify_payment.",
     inputSchema: {
       type: "object",
       properties: {
-        proof:   { type: "string", description: "Base64 payment payload from X-Payment header." },
-        network: { type: "string", enum: [...NETWORKS] },
+        proof:   { type: "string", description: "Base64-encoded payment proof from the client's X-Payment request header." },
+        network: { type: "string", enum: [...NETWORKS], description: "Blockchain network the proof was submitted on. Must match the network in the original x402 challenge." },
       },
       required: ["proof", "network"],
       additionalProperties: false,
@@ -535,9 +553,9 @@ export const TOOL_SCHEMAS = [
     inputSchema: {
       type: "object",
       properties: {
-        mandate_id: { type: "string", description: "mandate_id returned by generate_ap2_mandate." },
-        tx_id:      { type: "string", description: "On-chain transaction ID submitted by the paying agent." },
-        network:    { type: "string", enum: [...NETWORKS] },
+        mandate_id: { type: "string", description: "mandate_id returned by generate_ap2_mandate — links the transaction to the specific AP2 payment mandate." },
+        tx_id:      { type: "string", description: "On-chain transaction ID submitted by the paying agent after settling the mandate." },
+        network:    { type: "string", enum: [...NETWORKS], description: "Blockchain network the transaction was submitted on. Must match the network in the original mandate." },
       },
       required: ["mandate_id", "tx_id", "network"],
       additionalProperties: false,
