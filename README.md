@@ -29,7 +29,7 @@ Both expose the **same 11 tools** and the same API surface — pick whichever ru
 | 10 | `generate_ap2_mandate` | AP2 v0.1 `PaymentMandate` for AI agent payment flows |
 | 11 | `verify_ap2_payment` | Verify an AP2 mandate payment receipt |
 
-Supported networks: **Algorand**, **VOI**, **Hedera**, **Stellar** (USDC on all four).
+Supported networks: **Algorand**, **VOI**, **Hedera**, **Stellar**, **Base**, **Solana**, **Tempo** (USDC on all seven).
 
 ---
 
