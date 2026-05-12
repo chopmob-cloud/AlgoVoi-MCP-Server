@@ -16,15 +16,19 @@ Sections cited above refer to ALGOVOI_MCP.md.
 from __future__ import annotations
 
 import base64
+import re
 import hashlib
 import hmac as _hmac
 import json
 import os
 import secrets
+import ssl
 import sys
 import time
 from time import monotonic
 from typing import Any, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import mcp.types as mcp_types
 from mcp.server.lowlevel import Server
@@ -37,13 +41,27 @@ from .idempotency import IdempotencyCache
 from .networks import CAIP2, NETWORK_INFO, NETWORKS, PROTOCOLS
 from .redact import scrub
 from .schemas import (
+    ConfirmAuthorityInput,
     CreatePaymentLinkInput,
+    CreateRecurringAuthorityInput,
+    FetchAgentCardInput,
     GenerateAp2MandateInput,
     GenerateMppChallengeInput,
     GenerateX402ChallengeInput,
+    GetAuthorityInput,
+    ListAuthoritiesInput,
     ListNetworksInput,
+    ManualPullInput,
+    PauseAuthorityInput,
     PrepareExtensionPaymentInput,
+    ResumeAuthorityInput,
+    RevokeAuthorityInput,
+    DiscoverResourcesInput,
+    GetComplianceAttestationInput,
     SCHEMAS_BY_TOOL,
+    ScreenRecipientInput,
+    TryMppEndpointInput,
+    SendA2aMessageInput,
     VerifyAp2PaymentInput,
     VerifyMppReceiptInput,
     VerifyPaymentInput,
@@ -331,6 +349,278 @@ def tool_verify_ap2_payment(
     return {"verified": bool(resp.get("verified") or resp.get("valid"))}
 
 
+# ── 12. fetch_agent_card ─────────────────────────────────────────────────────
+
+def tool_fetch_agent_card(args: FetchAgentCardInput) -> dict:
+    url = args.agent_url.rstrip("/") + "/.well-known/agent.json"
+    try:
+        req = Request(
+            url,
+            headers={"Accept": "application/json", "User-Agent": "algovoi-mcp/1.2.0"},
+        )
+        with urlopen(req, timeout=5) as resp:
+            body = resp.read(64 * 1024)
+        card = json.loads(body)
+        return {"agent_url": args.agent_url, "card": card, "error": None}
+    except Exception as exc:
+        return {"agent_url": args.agent_url, "card": None, "error": str(exc)}
+
+
+# ── 13. send_a2a_message ──────────────────────────────────────────────────────
+
+def tool_send_a2a_message(args: SendA2aMessageInput) -> dict:
+    url        = args.agent_url.rstrip("/") + "/message:send"
+    message_id = args.message_id or secrets.token_hex(16)
+    payload    = json.dumps({
+        "message": {
+            "role":      "user",
+            "parts":     [{"type": "text", "text": args.text}],
+            "messageId": message_id,
+        },
+    }).encode()
+    headers = {
+        "Content-Type": "application/json",
+        "Accept":       "application/json",
+        "User-Agent":   "algovoi-mcp/1.2.0",
+    }
+    if args.payment_proof:
+        headers["Authorization"] = f"Payment {args.payment_proof}"
+
+    try:
+        req = Request(url, data=payload, headers=headers, method="POST")
+        with urlopen(req, timeout=30) as resp:
+            body = resp.read(256 * 1024)
+        task = json.loads(body)
+        return {"payment_required": False, "agent_url": args.agent_url, "task": task}
+    except HTTPError as exc:
+        if exc.code == 402:
+            challenge_headers = dict(exc.headers)
+            body402: dict = {}
+            try:
+                body402 = json.loads(exc.read(64 * 1024))
+            except Exception:
+                pass
+            return {
+                "payment_required":  True,
+                "challenge_headers": challenge_headers,
+                "request_id":        body402.get("request_id"),
+                "agent_url":         args.agent_url,
+                "note": (
+                    "Pay on-chain then retry with payment_proof set. "
+                    "Inspect challenge_headers — WWW-Authenticate = MPP, "
+                    "X-Payment-Required = x402, X-AP2-Cart-Mandate = AP2."
+                ),
+            }
+        return {
+            "payment_required": False,
+            "agent_url":        args.agent_url,
+            "task":             None,
+            "error":            f"HTTP {exc.code}: {exc.reason}",
+        }
+    except Exception as exc:
+        return {
+            "payment_required": False,
+            "agent_url":        args.agent_url,
+            "task":             None,
+            "error":            str(exc),
+        }
+
+
+# ── 14-21. Tier 2 — Standing-Authority Recurring Payments ────────────────────
+#
+# Eight tools exposing the full subscription lifecycle. Mirrors the
+# TypeScript MCP tier 2 surface. Each function takes a validated
+# Pydantic model and returns a dict shaped for the MCP wire.
+
+def tool_create_recurring_authority(
+    client: AlgoVoiClient, args: CreateRecurringAuthorityInput,
+) -> dict:
+    resp = client.create_recurring_authority(
+        subscription_id         = args.subscription_id,
+        chain                   = args.chain,
+        customer_wallet_address = args.customer_wallet_address,
+        cap_amount_minor        = args.cap_amount_minor,
+        cap_period_seconds      = args.cap_period_seconds,
+        per_cycle_amount_minor  = args.per_cycle_amount_minor,
+        asset                   = args.asset,
+        metadata                = args.metadata,
+    )
+    authority = resp.get("authority", {})
+    return {
+        "authority_id":            authority.get("id"),
+        "status":                  authority.get("status"),
+        "chain":                   authority.get("chain"),
+        "cap_amount_minor":        authority.get("cap_amount_minor"),
+        "customer_signing_payload": resp.get("customer_signing_payload"),
+        "authorisation_url":       resp.get("authorisation_url"),
+        "next_step": (
+            "Pass customer_signing_payload to the customer's wallet "
+            "(Pera/Defly/MetaMask/Phantom/HashPack/Freighter) for signing. "
+            "After the on-chain transaction lands, call confirm_authority"
+            "(authority_id, on_chain_address)."
+        ),
+    }
+
+
+def tool_get_authority(client: AlgoVoiClient, args: GetAuthorityInput) -> dict:
+    return client.get_authority(args.authority_id)
+
+
+def tool_list_authorities(
+    client: AlgoVoiClient, args: ListAuthoritiesInput,
+) -> dict:
+    auths = client.list_authorities(
+        subscription_id = args.subscription_id,
+        status          = args.status,
+        limit           = args.limit if args.limit is not None else 50,
+        offset          = args.offset if args.offset is not None else 0,
+    )
+    return {"authorities": auths, "count": len(auths)}
+
+
+def tool_confirm_authority(
+    client: AlgoVoiClient, args: ConfirmAuthorityInput,
+) -> dict:
+    return client.confirm_authority(
+        args.authority_id,
+        on_chain_address   = args.on_chain_address,
+        first_cycle_due_at = args.first_cycle_due_at,
+    )
+
+
+def tool_revoke_authority(
+    client: AlgoVoiClient, args: RevokeAuthorityInput,
+) -> dict:
+    return client.revoke_authority(args.authority_id)
+
+
+def tool_pause_authority(
+    client: AlgoVoiClient, args: PauseAuthorityInput,
+) -> dict:
+    return client.pause_authority(args.authority_id)
+
+
+def tool_resume_authority(
+    client: AlgoVoiClient, args: ResumeAuthorityInput,
+) -> dict:
+    return client.resume_authority(
+        args.authority_id,
+        next_cycle_due_at = args.next_cycle_due_at,
+    )
+
+
+def tool_manual_pull(
+    client: AlgoVoiClient, args: ManualPullInput,
+) -> dict:
+    return client.manual_pull(
+        authority_id    = args.authority_id,
+        amount_minor    = args.amount_minor,
+        idempotency_key = args.idempotency_key,
+    )
+
+
+def _parse_mpp_www_auth(header: str) -> dict:
+    """Decode a WWW-Authenticate: Payment header into structured challenge data."""
+    result: dict = {"raw_header": header}
+    if not header.lower().startswith("payment"):
+        return result
+    token_m    = re.search(r'token="([^"]+)"',    header)
+    resource_m = re.search(r'resource="([^"]+)"', header)
+    if resource_m:
+        result["resource_id"] = resource_m.group(1)
+    if token_m:
+        try:
+            raw = token_m.group(1)
+            padded = raw + "=" * (-len(raw) % 4)
+            decoded = json.loads(base64.b64decode(padded).decode("utf-8"))
+            result["challenge"] = decoded
+            if "accepts" in decoded:
+                result["accepts"] = decoded["accepts"]
+            if "expires" in decoded:
+                result["expires"] = decoded["expires"]
+        except Exception:
+            result["token_raw"] = token_m.group(1)
+    return result
+
+
+def tool_try_mpp_endpoint(_client: AlgoVoiClient, args: TryMppEndpointInput) -> dict:
+    """Probe any MPP-enabled URL. On 402 parse and return the payment challenge."""
+    method = (args.method or "GET").upper()
+    req = Request(args.url, method=method)
+    req.add_header("Accept", "application/json")
+    ctx = ssl.create_default_context()
+    try:
+        with urlopen(req, timeout=30, context=ctx) as resp:
+            body = resp.read().decode("utf-8", errors="replace")[:2048]
+            return {
+                "status":           resp.status,
+                "payment_required": False,
+                "message":          "Resource is accessible without payment.",
+                "body_preview":     body,
+            }
+    except HTTPError as exc:
+        if exc.code != 402:
+            return {"status": exc.code, "payment_required": False, "error": str(exc)}
+        www_auth = exc.headers.get("WWW-Authenticate", "")
+        return {"status": 402, "payment_required": True, **_parse_mpp_www_auth(www_auth)}
+    except URLError as exc:
+        return {"error": "unreachable", "detail": str(exc.reason)}
+
+
+def tool_discover_resources(client: AlgoVoiClient, _args: DiscoverResourcesInput) -> dict:
+    """Fetch the public AlgoVoi Bazaar catalog — all x402/MPP payable resources."""
+    url = f"{client.api_base}/discovery/resources"
+    req = Request(url, headers={"Accept": "application/json"}, method="GET")
+    ctx = ssl.create_default_context()
+    try:
+        with urlopen(req, timeout=30, context=ctx) as resp:
+            return json.loads(resp.read())
+    except (HTTPError, URLError) as exc:
+        return {"error": "discovery_unavailable", "detail": str(exc)}
+
+
+def tool_screen_recipient(client: AlgoVoiClient, args: ScreenRecipientInput) -> dict:
+    """Pre-payment SAMLA s.20 / OFSI / OFAC sanctions + KYB screen."""
+    payload: dict = {
+        "recipient_address": args.recipient_address,
+        "network":           args.network,
+    }
+    if args.amount_microunits is not None:
+        payload["amount_microunits"] = args.amount_microunits
+    if args.asset is not None:
+        payload["asset"] = args.asset
+    body = json.dumps(payload).encode()
+    url = f"{client.api_base}/compliance/screen"
+    req = Request(
+        url, data=body,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    ctx = ssl.create_default_context()
+    try:
+        with urlopen(req, timeout=30, context=ctx) as resp:
+            return json.loads(resp.read())
+    except HTTPError as exc:
+        body_err = exc.read().decode("utf-8", errors="replace")[:200]
+        return {"error": "screen_failed", "status": exc.code, "detail": body_err}
+    except URLError as exc:
+        return {"error": "screen_unavailable", "detail": str(exc.reason)}
+
+
+def tool_get_compliance_attestation(
+    client: AlgoVoiClient, _args: GetComplianceAttestationInput
+) -> dict:
+    """Fetch the operator's public compliance posture (frameworks, sanctions sources, KYB, audit chain)."""
+    url = f"{client.api_base}/compliance/attestation"
+    req = Request(url, headers={"Accept": "application/json"}, method="GET")
+    ctx = ssl.create_default_context()
+    try:
+        with urlopen(req, timeout=30, context=ctx) as resp:
+            return json.loads(resp.read())
+    except (HTTPError, URLError) as exc:
+        return {"error": "attestation_unavailable", "detail": str(exc)}
+
+
 # ── Tool schemas (MCP wire format — JSON Schema) ──────────────────────────────
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -530,6 +820,347 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "fetch_agent_card",
+        "description": (
+            "Fetch an A2A agent's public discovery card from {agent_url}/.well-known/agent.json. "
+            "Returns the agent's name, capabilities, skills, and supported payment schemes. "
+            "Use this before send_a2a_message to understand what the agent does and what it costs."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_url": {
+                    "type":        "string",
+                    "description": "Base HTTPS URL of the A2A agent (e.g. https://api1.example.com). Must start with https://.",
+                },
+            },
+            "required":             ["agent_url"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "send_a2a_message",
+        "description": (
+            "Send a message to a payment-gated A2A v1.0 agent (POST {agent_url}/message:send). "
+            "First call with no payment_proof — if the agent requires payment it returns "
+            "payment_required=true with challenge_headers (MPP / x402 / AP2). "
+            "Inspect the challenge, pay on-chain using the matching generate_*_challenge tool, "
+            "then retry with the payment_proof. On success returns the task result."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_url": {
+                    "type":        "string",
+                    "description": "Base HTTPS URL of the A2A agent. Must start with https://.",
+                },
+                "text": {
+                    "type":        "string",
+                    "description": "Message text to send (max 4096 chars).",
+                },
+                "payment_proof": {
+                    "type":        "string",
+                    "description": (
+                        "Optional payment proof to include as Authorization: Payment <proof>. "
+                        "Obtain after paying on-chain following a 402 challenge."
+                    ),
+                },
+                "message_id": {
+                    "type":        "string",
+                    "description": "Optional idempotency ID for the message (max 64 chars). Auto-generated if omitted.",
+                },
+            },
+            "required":             ["agent_url", "text"],
+            "additionalProperties": False,
+        },
+    },
+    # ── Tier 2 — Standing-Authority Recurring Payments ────────────────────
+    {
+        "name": "create_recurring_authority",
+        "description": (
+            "Create a Tier 2 standing authority for an existing AlgoVoi subscription. "
+            "Tier 2 = 'customer signs ONCE, AlgoVoi auto-pulls per cycle' — the "
+            "subscription / agent-bound spending pattern (vs Tier 1's pay-on-every-invoice). "
+            "Returns {authority_id, status, customer_signing_payload, next_step}. "
+            "The customer_signing_payload is a chain-specific template (Algorand "
+            "SpendingCapVault 6-action group, EVM ERC-20 approve, Solana SPL Approve, "
+            "Hedera HTS allowance, or Stellar Soroban auth_entry) — hand it to the "
+            "customer's wallet (Pera/Defly/MetaMask/Phantom/HashPack/Freighter) for signing. "
+            "After the on-chain transaction lands, call confirm_authority to mark the "
+            "authority active. AlgoVoi's cycle reaper then auto-pulls per cap_period_seconds. "
+            "Stellar uses 7-decimal precision for USDC; every other chain uses 6 — pass "
+            "cap_amount_minor in chain-native atomic units. "
+            "Authentication: requires ALGOVOI_API_KEY and ALGOVOI_TENANT_ID env vars. "
+            "Errors: throws if chain is unsupported, period < 86400, or per_cycle_amount_minor > cap_amount_minor."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "subscription_id": {
+                    "type":        "string",
+                    "description": "UUID of the Tier 1 subscription this authority is bound to. Create one via the dashboard or POST /v1/subscriptions first.",
+                },
+                "chain": {
+                    "type":        "string",
+                    "enum": [
+                        "algorand_mainnet", "algorand_testnet",
+                        "voi_mainnet",      "voi_testnet",
+                        "base_mainnet",     "base_sepolia",
+                        "tempo_mainnet",    "tempo_testnet",
+                        "solana_mainnet",   "solana_devnet",
+                        "hedera_mainnet",   "hedera_testnet",
+                        "stellar_mainnet",  "stellar_testnet",
+                    ],
+                    "description": "Blockchain network to authorise on. Each chain uses its native primitive.",
+                },
+                "customer_wallet_address": {
+                    "type":        "string",
+                    "description": "Customer's chain-native address (Algorand 58-char base32, EVM 0x-prefixed hex, Solana base58, Hedera 0.0.X, Stellar G-address).",
+                },
+                "cap_amount_minor": {
+                    "type":        "integer",
+                    "description": "Total spend cap over cap_period_seconds, in chain-native atomic units. e.g. 12 × $10 USDC on Algorand: 120_000_000 (6 decimals). Stellar: 1_200_000_000 (7 decimals).",
+                },
+                "cap_period_seconds": {
+                    "type":        "integer",
+                    "description": "Cap window length in seconds. Must be >= 86400 (1 day). Typical: 365 * 86400 = 31_536_000 for annual.",
+                },
+                "per_cycle_amount_minor": {
+                    "type":        "integer",
+                    "description": "Per-pull cap, in atomic units. Each cycle pulls at most this much. Must be <= cap_amount_minor.",
+                },
+                "asset": {
+                    "type":        "string",
+                    "description": "Asset symbol — defaults to USDC. Native coins (VOI/HBAR/XLM/ETH/SOL) supported per chain.",
+                },
+                "metadata": {
+                    "type":        "object",
+                    "description": "Free-form tenant metadata, forwarded on every webhook event.",
+                    "additionalProperties": True,
+                },
+            },
+            "required":             ["subscription_id", "chain", "customer_wallet_address", "cap_amount_minor", "cap_period_seconds", "per_cycle_amount_minor"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_authority",
+        "description": (
+            "Fetch the current state of a Tier 2 recurring authority by id. "
+            "Returns {id, status, on_chain_address, cap_remaining_minor, cycles_pulled, "
+            "cycles_failed, last_error, ...}. status transitions: pending → active (after "
+            "confirm_authority) → revoking → revoked, or paused/resumed mid-life, or "
+            "expired when the cap_amount or auth lifetime is exhausted."
+        ),
+        "inputSchema": {
+            "type":       "object",
+            "properties": {
+                "authority_id": {"type": "string", "description": "UUID returned by create_recurring_authority."},
+            },
+            "required":             ["authority_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_authorities",
+        "description": (
+            "List Tier 2 recurring authorities for this tenant. Returns {authorities: [...], count}. "
+            "Optionally filter by subscription_id or status (pending/active/paused/revoking/revoked/expired). "
+            "Default limit 50, max 200."
+        ),
+        "inputSchema": {
+            "type":       "object",
+            "properties": {
+                "subscription_id": {"type": "string",  "description": "Filter to authorities for one subscription."},
+                "status":          {"type": "string",  "description": "Filter by status: pending / active / paused / revoking / revoked / expired."},
+                "limit":           {"type": "integer", "description": "Max results (1-200, default 50)."},
+                "offset":          {"type": "integer", "description": "Pagination offset (default 0)."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "confirm_authority",
+        "description": (
+            "Mark a pending Tier 2 authority active after on-chain landing. Most flows "
+            "use AlgoVoi's hosted widget which calls this automatically via webhook — "
+            "surfaced here for self-hosted wallet UIs. on_chain_address format depends on "
+            "the chain: Algorand/VOI 'app:<application_id>', EVM '0x<tx_hash>', Solana "
+            "'<base58 tx signature>', Hedera '<account_id>@<seconds>.<nanos>', Stellar "
+            "'<64-char hex tx hash>'."
+        ),
+        "inputSchema": {
+            "type":       "object",
+            "properties": {
+                "authority_id":      {"type": "string", "description": "UUID returned by create_recurring_authority."},
+                "on_chain_address":  {"type": "string", "description": "Chain-native handle of the landed authorisation transaction."},
+                "first_cycle_due_at": {"type": "string", "description": "Optional ISO8601 first-cycle due-at; gateway computes one if omitted."},
+            },
+            "required":             ["authority_id", "on_chain_address"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "revoke_authority",
+        "description": (
+            "Revoke an active Tier 2 authority. Gateway constructs the chain-specific "
+            "revocation transaction (Algorand vault owner_withdraw + remove_agent, EVM "
+            "approve(0), Solana SPL revoke, Hedera approve(amount=0), Stellar Soroban "
+            "auth-entry expiry); the customer's wallet signs it. Authority transitions to "
+            "'revoking' until on-chain landing, then 'revoked'."
+        ),
+        "inputSchema": {
+            "type":       "object",
+            "properties": {
+                "authority_id": {"type": "string", "description": "UUID of the authority to revoke."},
+            },
+            "required":             ["authority_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "pause_authority",
+        "description": (
+            "Pause an active Tier 2 authority — no on-chain action. Stops cycle pulls until "
+            "resume_authority is called. Useful for billing holds, manual review, or "
+            "customer-initiated 'pause my subscription' flows."
+        ),
+        "inputSchema": {
+            "type":       "object",
+            "properties": {
+                "authority_id": {"type": "string", "description": "UUID of the authority to pause."},
+            },
+            "required":             ["authority_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "resume_authority",
+        "description": (
+            "Resume a paused Tier 2 authority. Optionally specify next_cycle_due_at "
+            "(ISO8601) to delay the first post-resume pull; otherwise pulls resume "
+            "immediately on the existing schedule."
+        ),
+        "inputSchema": {
+            "type":       "object",
+            "properties": {
+                "authority_id":      {"type": "string", "description": "UUID of the authority to resume."},
+                "next_cycle_due_at": {"type": "string", "description": "Optional ISO8601 timestamp for the next cycle pull."},
+            },
+            "required":             ["authority_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "manual_pull",
+        "description": (
+            "Manually trigger a one-off Tier 2 pull (catch-up after dunning, prorated "
+            "mid-cycle billing). Most pulls fire automatically via the cycle reaper — "
+            "only use this for proration or catch-up flows. amount_minor must be <= "
+            "the authority's per_cycle_amount_minor."
+        ),
+        "inputSchema": {
+            "type":       "object",
+            "properties": {
+                "authority_id":    {"type": "string",  "description": "UUID of an active authority."},
+                "amount_minor":    {"type": "integer", "description": "Pull amount in atomic units. Must be <= per_cycle_amount_minor."},
+                "idempotency_key": {"type": "string",  "description": "Optional client-supplied key for retry safety (max 128 chars)."},
+            },
+            "required":             ["authority_id", "amount_minor"],
+            "additionalProperties": False,
+        },
+    },
+    # ── Discovery & Compliance ────────────────────────────────────────────────
+    {
+        "name": "try_mpp_endpoint",
+        "description": (
+            "Probe any MPP-enabled URL to discover its payment requirements without paying. "
+            "Sends a GET (or specified method) request; if the server responds 402, parses the "
+            "WWW-Authenticate: Payment challenge and returns the decoded accepts[] array — "
+            "showing amount, network (CAIP-2), asset ID, and receiver address for each "
+            "accepted chain. Returns payment_required=false if the resource is freely accessible. "
+            "Mirrors `npx agentcash try <url>` for any MPP-gated endpoint, not just AlgoVoi's."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type":        "string",
+                    "description": "Full https:// URL of the MPP-gated endpoint to probe.",
+                },
+                "method": {
+                    "type":        "string",
+                    "description": "HTTP method to use (default: GET). Use HEAD to avoid downloading a large body.",
+                },
+            },
+            "required":             ["url"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "discover_resources",
+        "description": (
+            "Fetch the public AlgoVoi Bazaar catalog — all x402 and MPP payable resources "
+            "listed by active tenants, including the agent-trust-bench endpoints. Each entry "
+            "includes resource_id, price, accepted networks, and payment protocol details. "
+            "Mirrors `npx agentcash try https://api.algovoi.co.uk` — no API key required."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "screen_recipient",
+        "description": (
+            "Pre-payment compliance screen: checks a recipient wallet address against "
+            "OFSI / OFAC SDN / EU Consolidated sanctions lists plus AlgoVoi KYB status. "
+            "Returns verdict ('allow' | 'block' | 'flag'), sanctions_clear, risk_tier, and "
+            "reasons. Operates under SAMLA 2018 s.20 — reasons are intentionally generic; "
+            "specific list matches are never disclosed. No API key required; rate-limited "
+            "60/min. Call this before submitting any payment to an unknown counterparty."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "recipient_address": {
+                    "type": "string",
+                    "description": "On-chain wallet address of the payment recipient (4–128 chars).",
+                },
+                "network": {
+                    "type": "string",
+                    "description": "Network key (e.g. 'algorand_mainnet', 'base_mainnet', 'solana_mainnet').",
+                },
+                "amount_microunits": {
+                    "type": "integer",
+                    "description": "Optional: payment amount in atomic units — used for risk-tier calculation.",
+                },
+                "asset": {
+                    "type": "string",
+                    "description": "Optional: asset identifier (e.g. '31566704' for Algorand USDC).",
+                },
+            },
+            "required":             ["recipient_address", "network"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_compliance_attestation",
+        "description": (
+            "Fetch the operator's public compliance posture: active regulatory frameworks "
+            "(UK MLRs 2017, SAMLA 2018 s.20, UK GDPR), live sanctions sources (OFSI, OFAC, "
+            "EU), KYB gate status, audit chain heads (SHA-256 hash-chained ledger), and "
+            "off-VM Object Lock shipment status. No API key required. Use to verify the "
+            "platform's compliance state before processing high-value or regulated payments."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -587,6 +1218,35 @@ def _dispatch(
         result = tool_generate_ap2_mandate(client, args)           # type: ignore[arg-type]
     elif name == "verify_ap2_payment":
         result = tool_verify_ap2_payment(client, args)             # type: ignore[arg-type]
+    elif name == "fetch_agent_card":
+        result = tool_fetch_agent_card(args)                       # type: ignore[arg-type]
+    elif name == "send_a2a_message":
+        result = tool_send_a2a_message(args)                       # type: ignore[arg-type]
+    # Tier 2 — Standing-Authority Recurring Payments
+    elif name == "create_recurring_authority":
+        result = tool_create_recurring_authority(client, args)     # type: ignore[arg-type]
+    elif name == "get_authority":
+        result = tool_get_authority(client, args)                  # type: ignore[arg-type]
+    elif name == "list_authorities":
+        result = tool_list_authorities(client, args)               # type: ignore[arg-type]
+    elif name == "confirm_authority":
+        result = tool_confirm_authority(client, args)              # type: ignore[arg-type]
+    elif name == "revoke_authority":
+        result = tool_revoke_authority(client, args)               # type: ignore[arg-type]
+    elif name == "pause_authority":
+        result = tool_pause_authority(client, args)                # type: ignore[arg-type]
+    elif name == "resume_authority":
+        result = tool_resume_authority(client, args)               # type: ignore[arg-type]
+    elif name == "manual_pull":
+        result = tool_manual_pull(client, args)                            # type: ignore[arg-type]
+    elif name == "try_mpp_endpoint":
+        result = tool_try_mpp_endpoint(client, args)                       # type: ignore[arg-type]
+    elif name == "discover_resources":
+        result = tool_discover_resources(client, args)                     # type: ignore[arg-type]
+    elif name == "screen_recipient":
+        result = tool_screen_recipient(client, args)                       # type: ignore[arg-type]
+    elif name == "get_compliance_attestation":
+        result = tool_get_compliance_attestation(client, args)             # type: ignore[arg-type]
     else:
         raise ValueError(f"unknown tool: {name}")
 
@@ -678,7 +1338,7 @@ async def run_stdio() -> None:
     """Read env vars, build server, and run stdio transport."""
     api_key        = _require_env("ALGOVOI_API_KEY")
     tenant_id      = _require_env("ALGOVOI_TENANT_ID")
-    api_base       = os.environ.get("ALGOVOI_API_BASE", "https://api1.ilovechicken.co.uk")
+    api_base       = os.environ.get("ALGOVOI_API_BASE", "https://api.algovoi.co.uk")
     webhook_secret = os.environ.get("ALGOVOI_WEBHOOK_SECRET")
     enabled_tools  = _parse_enabled_tools(os.environ.get("MCP_ENABLED_TOOLS"))
 
@@ -690,6 +1350,9 @@ async def run_stdio() -> None:
         ("voi_mainnet",      "ALGOVOI_PAYOUT_VOI"),
         ("hedera_mainnet",   "ALGOVOI_PAYOUT_HEDERA"),
         ("stellar_mainnet",  "ALGOVOI_PAYOUT_STELLAR"),
+        ("base_mainnet",     "ALGOVOI_PAYOUT_BASE"),
+        ("solana_mainnet",   "ALGOVOI_PAYOUT_SOLANA"),
+        ("tempo_mainnet",    "ALGOVOI_PAYOUT_TEMPO"),
     ]
     payout_addresses: dict[str, str] = {}
     for key, env_var in chain_env:
@@ -700,7 +1363,8 @@ async def run_stdio() -> None:
         sys.stderr.write(
             "\n[algovoi-mcp] no payout address configured.\n"
             "Set ALGOVOI_PAYOUT_ALGORAND, ALGOVOI_PAYOUT_VOI, ALGOVOI_PAYOUT_HEDERA,\n"
-            "ALGOVOI_PAYOUT_STELLAR (or ALGOVOI_PAYOUT_ADDRESS as a universal fallback).\n\n"
+            "ALGOVOI_PAYOUT_STELLAR, ALGOVOI_PAYOUT_BASE, ALGOVOI_PAYOUT_SOLANA,\n"
+            "ALGOVOI_PAYOUT_TEMPO (or ALGOVOI_PAYOUT_ADDRESS as a universal fallback).\n\n"
         )
         raise SystemExit(2)
 

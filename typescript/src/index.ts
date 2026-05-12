@@ -39,6 +39,23 @@ import {
   generateX402Challenge,
   generateAp2Mandate,
   verifyAp2Payment,
+  fetchAgentCard,
+  sendA2aMessage,
+  // Tier 2 — Standing-Authority Recurring Payments
+  createRecurringAuthority,
+  getAuthority,
+  listAuthorities,
+  confirmAuthority,
+  revokeAuthority,
+  pauseAuthority,
+  resumeAuthority,
+  manualPull,
+  // MPP consumer probe
+  tryMppEndpoint,
+  // Discovery & Compliance
+  discoverResources,
+  screenRecipient,
+  getComplianceAttestation,
   TOOL_SCHEMAS,
 } from "./tools.js";
 
@@ -63,7 +80,7 @@ function optionalEnv(name: string): string | undefined {
 
 const API_KEY      = requireEnv("ALGOVOI_API_KEY");
 const TENANT_ID    = requireEnv("ALGOVOI_TENANT_ID");
-const API_BASE     = process.env.ALGOVOI_API_BASE || "https://api1.ilovechicken.co.uk";
+const API_BASE     = process.env.ALGOVOI_API_BASE || "https://api.algovoi.co.uk";
 const WEBHOOK_SECRET = process.env.ALGOVOI_WEBHOOK_SECRET;
 
 // Per-chain payout addresses. Per-chain vars take priority; ALGOVOI_PAYOUT_ADDRESS
@@ -75,6 +92,9 @@ const CHAIN_ENV: [string, string][] = [
   ["voi_mainnet",      "ALGOVOI_PAYOUT_VOI"],
   ["hedera_mainnet",   "ALGOVOI_PAYOUT_HEDERA"],
   ["stellar_mainnet",  "ALGOVOI_PAYOUT_STELLAR"],
+  ["base_mainnet",     "ALGOVOI_PAYOUT_BASE"],
+  ["solana_mainnet",   "ALGOVOI_PAYOUT_SOLANA"],
+  ["tempo_mainnet",    "ALGOVOI_PAYOUT_TEMPO"],
 ];
 for (const [key, envVar] of CHAIN_ENV) {
   const v = optionalEnv(envVar) ?? PAYOUT_FALLBACK;
@@ -84,7 +104,8 @@ if (Object.keys(PAYOUT_ADDRESSES).length === 0) {
   process.stderr.write(
     "\n[algovoi-mcp] no payout address configured.\n" +
     "Set ALGOVOI_PAYOUT_ALGORAND, ALGOVOI_PAYOUT_VOI, ALGOVOI_PAYOUT_HEDERA,\n" +
-    "ALGOVOI_PAYOUT_STELLAR (or ALGOVOI_PAYOUT_ADDRESS as a universal fallback).\n\n"
+    "ALGOVOI_PAYOUT_STELLAR, ALGOVOI_PAYOUT_BASE, ALGOVOI_PAYOUT_SOLANA,\n" +
+    "ALGOVOI_PAYOUT_TEMPO (or ALGOVOI_PAYOUT_ADDRESS as a universal fallback).\n\n"
   );
   process.exit(2);
 }
@@ -115,7 +136,7 @@ const client = new AlgoVoiClient({
 // ── MCP server ────────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "algovoi-mcp-server", version: "1.0.0" },
+  { name: "algovoi-mcp-server", version: "1.4.1" },
   { capabilities: { tools: {} } }
 );
 
@@ -211,6 +232,37 @@ async function dispatch(
       return generateAp2Mandate(client, args as any);
     case "verify_ap2_payment":
       return verifyAp2Payment(client, args as any);
+    case "fetch_agent_card":
+      return fetchAgentCard(args as any);
+    case "send_a2a_message":
+      return sendA2aMessage(args as any);
+    // Tier 2 — Standing-Authority Recurring Payments
+    case "create_recurring_authority":
+      return createRecurringAuthority(client, args as any);
+    case "get_authority":
+      return getAuthority(client, args as any);
+    case "list_authorities":
+      return listAuthorities(client, args as any);
+    case "confirm_authority":
+      return confirmAuthority(client, args as any);
+    case "revoke_authority":
+      return revokeAuthority(client, args as any);
+    case "pause_authority":
+      return pauseAuthority(client, args as any);
+    case "resume_authority":
+      return resumeAuthority(client, args as any);
+    case "manual_pull":
+      return manualPull(client, args as any);
+    // MPP consumer probe
+    case "try_mpp_endpoint":
+      return tryMppEndpoint(client, args as any);
+    // Discovery & Compliance
+    case "discover_resources":
+      return discoverResources(client, args as any);
+    case "screen_recipient":
+      return screenRecipient(client, args as any);
+    case "get_compliance_attestation":
+      return getComplianceAttestation(client, args as any);
     default:
       throw new Error(`unknown tool: ${name}`);
   }
