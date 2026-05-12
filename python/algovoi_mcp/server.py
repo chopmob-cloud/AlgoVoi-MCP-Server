@@ -548,6 +548,7 @@ def tool_try_mpp_endpoint(_client: AlgoVoiClient, args: TryMppEndpointInput) -> 
     method = (args.method or "GET").upper()
     req = Request(args.url, method=method)
     req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", AlgoVoiClient._UA)
     ctx = ssl.create_default_context()
     try:
         with urlopen(req, timeout=30, context=ctx) as resp:
@@ -570,7 +571,7 @@ def tool_try_mpp_endpoint(_client: AlgoVoiClient, args: TryMppEndpointInput) -> 
 def tool_discover_resources(client: AlgoVoiClient, _args: DiscoverResourcesInput) -> dict:
     """Fetch the public AlgoVoi Bazaar catalog — all x402/MPP payable resources."""
     url = f"{client.api_base}/discovery/resources"
-    req = Request(url, headers={"Accept": "application/json"}, method="GET")
+    req = Request(url, headers={"Accept": "application/json", "User-Agent": AlgoVoiClient._UA}, method="GET")
     ctx = ssl.create_default_context()
     try:
         with urlopen(req, timeout=30, context=ctx) as resp:
@@ -593,7 +594,8 @@ def tool_screen_recipient(client: AlgoVoiClient, args: ScreenRecipientInput) -> 
     url = f"{client.api_base}/compliance/screen"
     req = Request(
         url, data=body,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={"Content-Type": "application/json", "Accept": "application/json",
+                 "User-Agent": AlgoVoiClient._UA},
         method="POST",
     )
     ctx = ssl.create_default_context()
@@ -612,7 +614,7 @@ def tool_get_compliance_attestation(
 ) -> dict:
     """Fetch the operator's public compliance posture (frameworks, sanctions sources, KYB, audit chain)."""
     url = f"{client.api_base}/compliance/attestation"
-    req = Request(url, headers={"Accept": "application/json"}, method="GET")
+    req = Request(url, headers={"Accept": "application/json", "User-Agent": AlgoVoiClient._UA}, method="GET")
     ctx = ssl.create_default_context()
     try:
         with urlopen(req, timeout=30, context=ctx) as resp:
