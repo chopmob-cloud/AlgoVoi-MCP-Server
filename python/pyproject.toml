@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "algovoi-mcp"
-version = "1.4.1"
+version = "1.4.2"
 description = "MCP server for AlgoVoi — create crypto payment links, verify payments, probe MPP endpoints, screen recipients, and generate MPP / x402 challenges from any MCP client. Supports 25 tools across all 7 AlgoVoi chains: Algorand, VOI, Hedera, Stellar, Base, Solana, and Tempo."
 readme = "README.md"
 license = "MIT"

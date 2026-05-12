@@ -96,7 +96,7 @@ class AlgoVoiClient:
     # ── HTTP primitives ────────────────────────────────────────────────────
 
     # Cloudflare (and some CDNs) block the default "Python-urllib/3.x" UA.
-    _UA = "algovoi-mcp/1.4.1"
+    _UA = "algovoi-mcp/1.4.2"
 
     def _post(
         self,
