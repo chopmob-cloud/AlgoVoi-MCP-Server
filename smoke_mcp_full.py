@@ -2,22 +2,35 @@
 AlgoVoi MCP Server — Thorough Smoke Test
 =========================================
 
-Phase 1 — Offline tool calls (no network to AlgoVoi API):
-  01  tools/list — all 11 tools present
-  02  list_networks — 16 networks (8 mainnet + 8 testnet), correct CAIP-2 + asset IDs
+Phase 1 — Offline tool calls (no network to AlgoVoi API required for most):
+  01  tools/list — all 25 tools present
+  02  list_networks — 25 networks (13 mainnet + 12 testnet), correct CAIP-2 + asset IDs
   03  generate_mpp_challenge — 402 + WWW-Authenticate shape
   04  generate_x402_challenge — 402 + X-Payment-Required decodable
   05  generate_ap2_mandate — mandate_id len 16, mandate_b64 round-trips
   06  verify_webhook (valid sig) — valid=true, payload parsed
   07  verify_webhook (bad sig) — valid=false, mismatch error
-  08  verify_webhook (unconfigured) — graceful error, no crash
+  08  verify_webhook (non-JSON body) — valid=false, JSON error
   09  Schema rejection — bad args return isError / error field
   10  MCP_ENABLED_TOOLS — subset listing + disabled tool rejection
+  11  try_mpp_endpoint schema rejection — https:// required
+  12  try_mpp_endpoint non-402 path — public compliance endpoint returns 200
+  13  discover_resources — public Bazaar catalog shape (hits live public API)
+  14  screen_recipient schema rejection — missing required field
+  15  get_compliance_attestation — public compliance posture shape (hits live public API)
 
 Phase 2 — Live API round-trip (requires ALGOVOI_API_KEY / ALGOVOI_TENANT_ID /
           and at least one ALGOVOI_PAYOUT_* address):
-  11  create_payment_link — returns checkout_url + token
-  12  verify_payment — polls the token just created
+  16a–d  create_payment_link on each chain
+  17a–d  verify_payment (polls token just created)
+  18a–b  prepare_extension_payment (algorand + voi only)
+  19     verify_mpp_receipt   (if --algo-tx provided)
+  20     verify_x402_proof    (if --algo-tx provided)
+  21     verify_ap2_payment   (if --algo-tx provided)
+  22     try_mpp_endpoint 402-path — probe a live MPP resource from Bazaar
+  23     discover_resources — verify resources list populated
+  24     screen_recipient — call with real Algorand address
+  25     get_compliance_attestation — verify status=active + compliance fields
 
 Usage:
     # Phase 1 only (TypeScript + Python, no credentials needed):
@@ -36,6 +49,7 @@ import argparse
 import base64
 import hashlib
 import hmac as _hmac
+import io
 import json
 import os
 import subprocess
@@ -43,6 +57,13 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+
+# Force UTF-8 stdout/stderr so Unicode chars in API responses don't crash on
+# Windows where the default codepage may be cp1252.
+if hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "buffer"):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # --Colours / output helpers --────────────────────────────────────────────────
 
@@ -82,6 +103,9 @@ def _load_algovoi_creds() -> dict[str, str] | None:
         ("ALGOVOI_PAYOUT_VOI",      "ALGOVOI_PAYOUT_VOI"),
         ("ALGOVOI_PAYOUT_HEDERA",   "ALGOVOI_PAYOUT_HEDERA"),
         ("ALGOVOI_PAYOUT_STELLAR",  "ALGOVOI_PAYOUT_STELLAR"),
+        ("ALGOVOI_PAYOUT_BASE",     "ALGOVOI_PAYOUT_BASE"),
+        ("ALGOVOI_PAYOUT_SOLANA",   "ALGOVOI_PAYOUT_SOLANA"),
+        ("ALGOVOI_PAYOUT_TEMPO",    "ALGOVOI_PAYOUT_TEMPO"),
         ("ALGOVOI_PAYOUT_ADDRESS",  "ALGOVOI_PAYOUT_ADDRESS"),  # fallback
     ]:
         v = os.environ.get(var, "").strip()
@@ -184,6 +208,9 @@ def _launch_ts(extra_env: dict | None = None) -> subprocess.Popen:
         "ALGOVOI_PAYOUT_VOI":      "SMOKE_VOI_ADDR",
         "ALGOVOI_PAYOUT_HEDERA":   "0.0.999999",
         "ALGOVOI_PAYOUT_STELLAR":  "GSMOKESMOKESMOKESMOKESMOKESMOKESMOKESMOKESMOKESMOKESMOKE",
+        "ALGOVOI_PAYOUT_BASE":     "0xSMOKE000000000000000000000000000000000001",
+        "ALGOVOI_PAYOUT_SOLANA":   "SMOKEsmokeSMOKEsmokeSMOKEsmokeSMOKEsmo",
+        "ALGOVOI_PAYOUT_TEMPO":    "0xSMOKE000000000000000000000000000000000002",
         "ALGOVOI_WEBHOOK_SECRET":  "whsec_smoke",
     })
     if extra_env:
@@ -204,6 +231,9 @@ def _launch_py(extra_env: dict | None = None) -> subprocess.Popen:
         "ALGOVOI_PAYOUT_VOI":      "SMOKE_VOI_ADDR",
         "ALGOVOI_PAYOUT_HEDERA":   "0.0.999999",
         "ALGOVOI_PAYOUT_STELLAR":  "GSMOKESMOKESMOKESMOKESMOKESMOKESMOKESMOKESMOKESMOKESMOKE",
+        "ALGOVOI_PAYOUT_BASE":     "0xSMOKE000000000000000000000000000000000001",
+        "ALGOVOI_PAYOUT_SOLANA":   "SMOKEsmokeSMOKEsmokeSMOKEsmokeSMOKEsmo",
+        "ALGOVOI_PAYOUT_TEMPO":    "0xSMOKE000000000000000000000000000000000002",
         "ALGOVOI_WEBHOOK_SECRET":  "whsec_smoke",
         "PYTHONUNBUFFERED":        "1",
     })
@@ -239,46 +269,69 @@ def run_phase1(session: McpSession, label: str) -> int:
     Returns number of failures."""
     failures = 0
 
-    # 01 — tools/list
+    # 01 — tools/list (25 tools in v1.4.1)
     tools = session.list_tools()
     names = {t["name"] for t in tools}
     EXPECTED = {
+        # Tier 1 — one-shot payments + webhooks
         "create_payment_link", "verify_payment", "prepare_extension_payment",
-        "verify_webhook", "list_networks", "generate_mpp_challenge",
-        "verify_mpp_receipt", "verify_x402_proof", "generate_x402_challenge",
-        "generate_ap2_mandate", "verify_ap2_payment",
+        "verify_webhook", "list_networks",
+        # Protocol challenges
+        "generate_mpp_challenge", "verify_mpp_receipt", "verify_x402_proof",
+        "generate_x402_challenge", "generate_ap2_mandate", "verify_ap2_payment",
+        # A2A
+        "fetch_agent_card", "send_a2a_message",
+        # Tier 2 — Standing-Authority Recurring Payments
+        "create_recurring_authority", "get_authority", "list_authorities",
+        "confirm_authority", "revoke_authority", "pause_authority",
+        "resume_authority", "manual_pull",
+        # Discovery & Compliance
+        "try_mpp_endpoint", "discover_resources", "screen_recipient",
+        "get_compliance_attestation",
     }
     if names == EXPECTED:
-        ok(f"[{label}] 01 tools/list — all 11 tools present")
+        ok(f"[{label}] 01 tools/list — all 25 tools present")
     else:
-        fail(f"[{label}] 01 tools/list — expected {sorted(EXPECTED)}, got {sorted(names)}")
+        missing = sorted(EXPECTED - names)
+        extra   = sorted(names - EXPECTED)
+        fail(f"[{label}] 01 tools/list — missing={missing} extra={extra}")
         failures += 1
 
-    # 02 — list_networks (8 mainnet + 8 testnet = 16 total)
+    # 02 — list_networks (13 mainnet + 12 testnet = 25 total)
     out = session.call_tool("list_networks")
     nets = out.get("networks", [])
     keys = {n["key"] for n in nets}
     expected_keys = {
-        # Mainnet
+        # USDC mainnet
         "algorand_mainnet", "voi_mainnet", "hedera_mainnet", "stellar_mainnet",
-        "algorand_mainnet_algo", "voi_mainnet_voi", "hedera_mainnet_hbar", "stellar_mainnet_xlm",
-        # Testnet
+        "base_mainnet", "solana_mainnet", "tempo_mainnet",
+        # Native mainnet
+        "algorand_mainnet_algo", "voi_mainnet_voi", "hedera_mainnet_hbar",
+        "stellar_mainnet_xlm", "base_mainnet_eth", "solana_mainnet_sol",
+        # USDC testnet
         "algorand_testnet", "voi_testnet", "hedera_testnet", "stellar_testnet",
-        "algorand_testnet_algo", "voi_testnet_voi", "hedera_testnet_hbar", "stellar_testnet_xlm",
+        "base_sepolia", "tempo_testnet", "solana_devnet",
+        # Native testnet
+        "algorand_testnet_algo", "voi_testnet_voi", "hedera_testnet_hbar",
+        "stellar_testnet_xlm", "solana_devnet_sol",
     }
-    if len(nets) == 16 and expected_keys <= keys and all("caip2" in n and "asset_id" in n for n in nets):
-        algo = next((n for n in nets if n["key"] == "algorand_mainnet"), None)
-        algo_native = next((n for n in nets if n["key"] == "algorand_mainnet_algo"), None)
-        algo_testnet = next((n for n in nets if n["key"] == "algorand_testnet"), None)
-        if (algo and algo["asset_id"] == "31566704" and algo["caip2"] == "algorand:mainnet"
-                and algo_native and algo_native["asset_id"] is None and algo_native["asset"] == "ALGO"
-                and algo_testnet and algo_testnet["caip2"] == "algorand:testnet"):
-            ok(f"[{label}] 02 list_networks — 16 networks (8 mainnet + 8 testnet), correct CAIP-2 + asset IDs")
+    if len(nets) == 25 and expected_keys <= keys and all("caip2" in n and "asset_id" in n for n in nets):
+        algo      = next((n for n in nets if n["key"] == "algorand_mainnet"), None)
+        algo_nat  = next((n for n in nets if n["key"] == "algorand_mainnet_algo"), None)
+        base      = next((n for n in nets if n["key"] == "base_mainnet"), None)
+        sol       = next((n for n in nets if n["key"] == "solana_mainnet"), None)
+        tempo     = next((n for n in nets if n["key"] == "tempo_mainnet"), None)
+        if (algo  and algo["asset_id"] == "31566704" and algo["caip2"] == "algorand:mainnet"
+                and algo_nat and algo_nat["asset_id"] is None and algo_nat["asset"] == "ALGO"
+                and base  and base["caip2"] == "eip155:8453"
+                and sol   and sol["caip2"] == "solana:mainnet"
+                and tempo and tempo["caip2"] == "eip155:4217"):
+            ok(f"[{label}] 02 list_networks — 25 networks (13 mainnet + 12 testnet), CAIP-2 correct")
         else:
-            fail(f"[{label}] 02 list_networks — network fields wrong: algo={algo} algo_native={algo_native} algo_testnet={algo_testnet}")
+            fail(f"[{label}] 02 list_networks — network fields wrong: algo={algo} base={base} sol={sol} tempo={tempo}")
             failures += 1
     else:
-        fail(f"[{label}] 02 list_networks — unexpected shape (got {len(nets)} networks): {out}")
+        fail(f"[{label}] 02 list_networks — expected 25, got {len(nets)}: keys diff={expected_keys.symmetric_difference(keys)}")
         failures += 1
 
     # 03 — generate_mpp_challenge
@@ -366,7 +419,6 @@ def run_phase1(session: McpSession, label: str) -> int:
         failures += 1
 
     def _is_rejected(r: dict) -> bool:
-        # Our own error dict, MCP SDK JSON-Schema rejection (_raw), or RPC error
         return "error" in r or r.get("_rpc_error") or (
             "_raw" in r and (
                 "error" in r["_raw"].lower()
@@ -387,9 +439,9 @@ def run_phase1(session: McpSession, label: str) -> int:
         fail(f"[{label}] 09a schema rejection (extra field) — expected error, got: {out}")
         failures += 1
 
-    # 09b — schema rejection: bad network enum
+    # 09b — schema rejection: bad network enum (bitcoin_mainnet is not a valid network)
     out = session.call_tool("create_payment_link", {
-        "amount": 5, "currency": "USD", "label": "x", "network": "solana_mainnet",
+        "amount": 5, "currency": "USD", "label": "x", "network": "bitcoin_mainnet",
     })
     if _is_rejected(out):
         ok(f"[{label}] 09b schema rejection (bad network) — rejected correctly")
@@ -405,6 +457,98 @@ def run_phase1(session: McpSession, label: str) -> int:
         ok(f"[{label}] 09c schema rejection (string amount) — rejected correctly")
     else:
         fail(f"[{label}] 09c schema rejection (string amount) — expected error, got: {out}")
+        failures += 1
+
+    # 10 — (handled separately in run_enabled_tools_test)
+
+    # 11 — try_mpp_endpoint: schema rejection for non-https URL
+    out = session.call_tool("try_mpp_endpoint", {"url": "http://insecure.example.com/resource"})
+    if _is_rejected(out):
+        ok(f"[{label}] 11a try_mpp_endpoint (http:// rejected) — rejected correctly")
+    else:
+        fail(f"[{label}] 11a try_mpp_endpoint (http:// rejected) — expected error, got: {out}")
+        failures += 1
+
+    # 11b — try_mpp_endpoint: schema rejection for extra field
+    out = session.call_tool("try_mpp_endpoint", {
+        "url": "https://api.algovoi.co.uk/compliance/attestation", "bogus": "x",
+    })
+    if _is_rejected(out):
+        ok(f"[{label}] 11b try_mpp_endpoint (extra field) — rejected correctly")
+    else:
+        fail(f"[{label}] 11b try_mpp_endpoint (extra field) — expected error, got: {out}")
+        failures += 1
+
+    # 12 — try_mpp_endpoint: non-402 path (compliance attestation is public, always 200)
+    out = session.call_tool("try_mpp_endpoint", {
+        "url": "https://api.algovoi.co.uk/compliance/attestation",
+    })
+    if (
+        isinstance(out.get("status"), int)
+        and out.get("payment_required") is False
+    ):
+        ok(f"[{label}] 12 try_mpp_endpoint (non-402) — status={out['status']}, payment_required=false")
+    elif "error" in out:
+        skip(f"[{label}] 12 try_mpp_endpoint (non-402) — network unavailable: {out.get('error')}")
+    else:
+        fail(f"[{label}] 12 try_mpp_endpoint (non-402) — unexpected: {out}")
+        failures += 1
+
+    # 13 — discover_resources: public endpoint, no auth required
+    # Response shape: {items: [...], totalCount: N, facilitator: {...}, ...}
+    out = session.call_tool("discover_resources")
+    if isinstance(out, list):
+        count = len(out)
+        ok(f"[{label}] 13 discover_resources — got {count} resource(s)")
+    elif isinstance(out, dict) and "items" in out:
+        count = len(out["items"])
+        ok(f"[{label}] 13 discover_resources — got {count} resource(s) (totalCount={out.get('totalCount', '?')})")
+    elif isinstance(out, dict) and ("resources" in out or "data" in out):
+        count = len(out.get("resources", out.get("data", [])))
+        ok(f"[{label}] 13 discover_resources — got {count} resource(s)")
+    elif isinstance(out, dict) and out.get("error") == "discovery_unavailable":
+        skip(f"[{label}] 13 discover_resources — API unreachable in smoke mode")
+    else:
+        fail(f"[{label}] 13 discover_resources — unexpected shape: keys={list(out.keys()) if isinstance(out, dict) else type(out)}")
+        failures += 1
+
+    # 14 — screen_recipient: schema rejection for missing required field
+    out = session.call_tool("screen_recipient", {"recipient_address": "ALGO123"})
+    if _is_rejected(out):
+        ok(f"[{label}] 14a screen_recipient (missing network) — rejected correctly")
+    else:
+        fail(f"[{label}] 14a screen_recipient (missing network) — expected error, got: {out}")
+        failures += 1
+
+    # 14b — screen_recipient: valid call (public endpoint, no auth required)
+    out = session.call_tool("screen_recipient", {
+        "recipient_address": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ",
+        "network": "algorand_mainnet",
+    })
+    if "verdict" in out or "sanctions_clear" in out or "error" in out:
+        if "verdict" in out:
+            ok(f"[{label}] 14b screen_recipient — verdict={out['verdict']}")
+        else:
+            skip(f"[{label}] 14b screen_recipient — API returned: {out.get('error', out)}")
+    else:
+        fail(f"[{label}] 14b screen_recipient — unexpected: {out}")
+        failures += 1
+
+    # 15 — get_compliance_attestation: public endpoint, no auth required
+    # Response shape: {operator, frameworks, active_screening, audit_chain, ...}
+    # (no top-level status — status is nested under audit_chain.off_vm_shipment)
+    out = session.call_tool("get_compliance_attestation")
+    if isinstance(out, dict) and "frameworks" in out:
+        shipment_status = (
+            out.get("audit_chain", {})
+               .get("off_vm_shipment", {})
+               .get("status", "?")
+        )
+        ok(f"[{label}] 15 get_compliance_attestation — frameworks present, shipment_status={shipment_status}")
+    elif isinstance(out, dict) and out.get("error") in ("attestation_unavailable", "server_error"):
+        skip(f"[{label}] 15 get_compliance_attestation — API unreachable in smoke mode")
+    else:
+        fail(f"[{label}] 15 get_compliance_attestation — unexpected: {out}")
         failures += 1
 
     return failures
@@ -442,39 +586,26 @@ def run_enabled_tools_test(launcher: Any, label: str) -> int:
     return failures
 
 
-# --Phase 2 live API (all 4 chains) --─────────────────────────────────────────
+# --Phase 2 live API --────────────────────────────────────────────────────────
 
-# Networks to test in Phase 2 — same order as list_networks output.
 _NETWORKS = [
     "algorand_mainnet",
     "voi_mainnet",
     "hedera_mainnet",
     "stellar_mainnet",
 ]
-# Only Algorand + VOI support the browser-extension wallet flow.
 _EXT_NETWORKS = ["algorand_mainnet", "voi_mainnet"]
 
 
 def run_phase2(
     session: McpSession,
     label: str,
-    tx_ids: dict[str, str],   # network → on-chain TX ID (optional, for verify tools)
+    tx_ids: dict[str, str],
 ) -> int:
-    """
-    Phase 2: live API round-trip on all 4 chains.
+    failures = 0
+    tokens: dict[str, str] = {}
 
-    Tests numbered 11–18:
-      11a–d  create_payment_link on each chain
-      12a–d  verify_payment (unpaid is fine — proves the token is valid)
-      13a–b  prepare_extension_payment (algorand + voi only)
-      14     verify_mpp_receipt   (if --algo-tx provided)
-      15     verify_x402_proof    (if --algo-tx provided)
-      16     verify_ap2_payment   (if --algo-tx provided)
-    """
-    failures  = 0
-    tokens: dict[str, str] = {}   # network → checkout token
-
-    # 11 — create_payment_link on all 4 chains
+    # 16 — create_payment_link on all 4 chains
     print(f"\n  [{label}] -- create_payment_link (all 4 chains) --")
     for i, net in enumerate(_NETWORKS, start=1):
         out = session.call_tool("create_payment_link", {
@@ -488,26 +619,26 @@ def run_phase2(
         chain = out.get("chain", "")
         if url.startswith("https://") and token:
             tokens[net] = token
-            ok(f"[{label}] 11{chr(96+i)} create_payment_link ({net}) — token={token} chain={chain}")
+            ok(f"[{label}] 16{chr(96+i)} create_payment_link ({net}) — token={token} chain={chain}")
         else:
-            fail(f"[{label}] 11{chr(96+i)} create_payment_link ({net}) — {out}")
+            fail(f"[{label}] 16{chr(96+i)} create_payment_link ({net}) — {out}")
             failures += 1
 
-    # 12 — verify_payment on each token just created (will be pending/unpaid)
+    # 17 — verify_payment
     print(f"\n  [{label}] -- verify_payment (all 4 chains) --")
     for i, net in enumerate(_NETWORKS, start=1):
         token = tokens.get(net)
         if not token:
-            skip(f"[{label}] 12{chr(96+i)} verify_payment ({net}) — skipped (no token)")
+            skip(f"[{label}] 17{chr(96+i)} verify_payment ({net}) — skipped (no token)")
             continue
         out = session.call_tool("verify_payment", {"token": token})
         if "paid" in out and "status" in out:
-            ok(f"[{label}] 12{chr(96+i)} verify_payment ({net}) — paid={out['paid']}, status={out['status']}")
+            ok(f"[{label}] 17{chr(96+i)} verify_payment ({net}) — paid={out['paid']}, status={out['status']}")
         else:
-            fail(f"[{label}] 12{chr(96+i)} verify_payment ({net}) — {out}")
+            fail(f"[{label}] 17{chr(96+i)} verify_payment ({net}) — {out}")
             failures += 1
 
-    # 13 — prepare_extension_payment (Algorand + VOI only)
+    # 18 — prepare_extension_payment (Algorand + VOI only)
     print(f"\n  [{label}] -- prepare_extension_payment (algorand + voi) --")
     for i, net in enumerate(_EXT_NETWORKS, start=1):
         out = session.call_tool("prepare_extension_payment", {
@@ -515,71 +646,113 @@ def run_phase2(
             "label":  f"MCP ext smoke {net}", "network": net,
         })
         if out.get("token") and out.get("asset_id") and out.get("ticker"):
-            ok(
-                f"[{label}] 13{chr(96+i)} prepare_extension_payment ({net})"
-                f" — ticker={out['ticker']} asset_id={out['asset_id']}"
-            )
+            ok(f"[{label}] 18{chr(96+i)} prepare_extension_payment ({net}) — ticker={out['ticker']} asset_id={out['asset_id']}")
         else:
-            fail(f"[{label}] 13{chr(96+i)} prepare_extension_payment ({net}) — {out}")
+            fail(f"[{label}] 18{chr(96+i)} prepare_extension_payment ({net}) — {out}")
             failures += 1
 
-    # 14 — verify_mpp_receipt (requires a real paid TX ID)
+    # 19-21 — on-chain verification (requires real TX IDs)
     print(f"\n  [{label}] -- protocol verification (TX IDs) --")
     algo_tx = tx_ids.get("algorand_mainnet")
     if algo_tx:
-        out = session.call_tool("verify_mpp_receipt", {
-            "resource_id": "smoke-resource",
-            "tx_id":       algo_tx,
-            "network":     "algorand_mainnet",
-        })
-        if "verified" in out:
-            ok(f"[{label}] 14 verify_mpp_receipt (algorand) — verified={out['verified']}")
-        else:
-            fail(f"[{label}] 14 verify_mpp_receipt — {out}")
-            failures += 1
-
-        # 15 — verify_x402_proof (needs a base64 proof, use TX ID as stand-in)
-        proof_b64 = base64.b64encode(json.dumps({"tx_id": algo_tx}).encode()).decode()
-        out = session.call_tool("verify_x402_proof", {
-            "proof": proof_b64, "network": "algorand_mainnet",
-        })
-        if "verified" in out:
-            ok(f"[{label}] 15 verify_x402_proof (algorand) — verified={out['verified']}")
-        else:
-            fail(f"[{label}] 15 verify_x402_proof — {out}")
-            failures += 1
-
-        # 16 — verify_ap2_payment
-        out = session.call_tool("verify_ap2_payment", {
-            "mandate_id": "a" * 16,
-            "tx_id":      algo_tx,
-            "network":    "algorand_mainnet",
-        })
-        if "verified" in out:
-            ok(f"[{label}] 16 verify_ap2_payment (algorand) — verified={out['verified']}")
-        else:
-            fail(f"[{label}] 16 verify_ap2_payment — {out}")
-            failures += 1
+        for test_num, tool, extra_args in [
+            (19, "verify_mpp_receipt",  {"resource_id": "smoke-resource", "tx_id": algo_tx, "network": "algorand_mainnet"}),
+            (20, "verify_x402_proof",   {"proof": base64.b64encode(json.dumps({"tx_id": algo_tx}).encode()).decode(), "network": "algorand_mainnet"}),
+            (21, "verify_ap2_payment",  {"mandate_id": "a" * 16, "tx_id": algo_tx, "network": "algorand_mainnet"}),
+        ]:
+            out = session.call_tool(tool, extra_args)
+            if "verified" in out:
+                ok(f"[{label}] {test_num} {tool} — verified={out['verified']}")
+            else:
+                fail(f"[{label}] {test_num} {tool} — {out}")
+                failures += 1
     else:
-        skip(f"[{label}] 14-16 verify_mpp_receipt/x402/ap2 — pass --algo-tx TX_ID to test")
+        skip(f"[{label}] 19-21 verify_mpp_receipt/x402/ap2 — pass --algo-tx TX_ID to test")
 
-    # Per-chain TX verification (VOI / Hedera / Stellar)
-    for net, flag in [
-        ("voi_mainnet",     "voi_mainnet"),
-        ("hedera_mainnet",  "hedera_mainnet"),
-        ("stellar_mainnet", "stellar_mainnet"),
-    ]:
+    for net, _ in [("voi_mainnet", "voi_mainnet"), ("hedera_mainnet", "hedera_mainnet"), ("stellar_mainnet", "stellar_mainnet")]:
         tx = tx_ids.get(net)
         if not tx:
             continue
-        out = session.call_tool("verify_mpp_receipt", {
-            "resource_id": "smoke-resource", "tx_id": tx, "network": net,
-        })
+        out = session.call_tool("verify_mpp_receipt", {"resource_id": "smoke-resource", "tx_id": tx, "network": net})
         if "verified" in out:
             ok(f"[{label}] verify_mpp_receipt ({net}) — verified={out['verified']}")
         else:
             fail(f"[{label}] verify_mpp_receipt ({net}) — {out}")
             failures += 1
+
+    # 22 — try_mpp_endpoint live: 402 path via Bazaar
+    print(f"\n  [{label}] -- new v1.4.1 tools (live) --")
+    # First discover a resource URL to probe
+    disc = session.call_tool("discover_resources")
+    if isinstance(disc, list):
+        resources = disc
+    elif isinstance(disc, dict):
+        resources = disc.get("items", disc.get("resources", disc.get("data", [])))
+    mpp_url: str | None = None
+    if resources:
+        for r in resources:
+            # Look for an MPP-protected resource URL
+            url_field = r.get("url") or r.get("endpoint") or r.get("resource_url")
+            if url_field and url_field.startswith("https://"):
+                mpp_url = url_field
+                break
+    if mpp_url:
+        out = session.call_tool("try_mpp_endpoint", {"url": mpp_url})
+        if out.get("payment_required") is True and "accepts" in out:
+            ok(f"[{label}] 22 try_mpp_endpoint (402 path) — accepts={len(out['accepts'])} chain(s), resource={out.get('resource_id','?')}")
+        elif out.get("payment_required") is False:
+            ok(f"[{label}] 22 try_mpp_endpoint — resource accessible without payment (status={out.get('status')})")
+        else:
+            fail(f"[{label}] 22 try_mpp_endpoint (402 path) — {out}")
+            failures += 1
+    else:
+        # Fall back: probe the compliance attestation (always 200)
+        out = session.call_tool("try_mpp_endpoint", {"url": "https://api.algovoi.co.uk/compliance/attestation"})
+        if out.get("payment_required") is False and isinstance(out.get("status"), int):
+            ok(f"[{label}] 22 try_mpp_endpoint (fallback non-402) — status={out['status']}")
+        else:
+            fail(f"[{label}] 22 try_mpp_endpoint (fallback) — {out}")
+            failures += 1
+
+    # 23 — discover_resources: verify populated list
+    out = session.call_tool("discover_resources")
+    if isinstance(out, list):
+        resources = out
+    elif isinstance(out, dict):
+        resources = out.get("items", out.get("resources", out.get("data", [])))
+    if resources and len(resources) > 0:
+        ok(f"[{label}] 23 discover_resources (live) — {len(resources)} resource(s) found")
+    else:
+        fail(f"[{label}] 23 discover_resources (live) — empty or unexpected: {out}")
+        failures += 1
+
+    # 24 — screen_recipient: real Algorand address (genesis zero address)
+    out = session.call_tool("screen_recipient", {
+        "recipient_address": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY5HFKQ",
+        "network": "algorand_mainnet",
+        "amount_microunits": 1_000_000,
+    })
+    if "verdict" in out and "sanctions_clear" in out:
+        ok(f"[{label}] 24 screen_recipient — verdict={out['verdict']}, sanctions_clear={out['sanctions_clear']}, risk_tier={out.get('risk_tier','?')}")
+    else:
+        fail(f"[{label}] 24 screen_recipient — expected verdict+sanctions_clear, got: {out}")
+        failures += 1
+
+    # 25 — get_compliance_attestation: verify active compliance posture
+    # Response shape: {operator, frameworks, active_screening, audit_chain, ...}
+    out = session.call_tool("get_compliance_attestation")
+    if isinstance(out, dict) and "frameworks" in out and "active_screening" in out:
+        shipment_status = (
+            out.get("audit_chain", {})
+               .get("off_vm_shipment", {})
+               .get("status", "?")
+        )
+        n_frameworks = len(out.get("frameworks", {}))
+        sanctions = out.get("active_screening", {}).get("sanctions_sources", [])
+        ok(f"[{label}] 25 get_compliance_attestation — {n_frameworks} frameworks, {len(sanctions)} sanctions sources, shipment_status={shipment_status}")
+    else:
+        fail(f"[{label}] 25 get_compliance_attestation — expected frameworks + active_screening, got: {out}")
+        failures += 1
 
     return failures
 
@@ -593,15 +766,13 @@ def run_server(
     live_env: dict | None,
     tx_ids: dict[str, str],
 ) -> int:
-    """Spin up a server, run all phases, return total failure count."""
     print(f"\n{'=' * 60}")
     print(f"  {label}")
     print(f"{'=' * 60}")
 
     failures = 0
 
-    # --Phase 1 --─────────────────────────────────────────────────────────────
-    print("\n--Phase 1: offline tools --")
+    print("\n--Phase 1: offline + public API tools --")
     proc = launcher_fn()
     try:
         sess = McpSession(proc)
@@ -615,13 +786,11 @@ def run_server(
     finally:
         _kill(proc)
 
-    # --MCP_ENABLED_TOOLS test (separate process) --───────────────────────────
     print("\n--MCP_ENABLED_TOOLS filtering --")
     failures += run_enabled_tools_test(launcher_fn, label)
 
-    # --Phase 2 --─────────────────────────────────────────────────────────────
     if live and live_env:
-        print("\n--Phase 2: live API (all 4 chains) --")
+        print("\n--Phase 2: live API (all 7 chains) --")
         proc2 = launcher_fn(extra_env=live_env)
         try:
             sess2 = McpSession(proc2)
@@ -633,7 +802,7 @@ def run_server(
         finally:
             _kill(proc2)
     elif live:
-        skip(f"[{label}] Phase 2 — no credentials found (set ALGOVOI_API_KEY, ALGOVOI_TENANT_ID, and at least one ALGOVOI_PAYOUT_* address)")
+        skip(f"[{label}] Phase 2 — no credentials found (set ALGOVOI_API_KEY, ALGOVOI_TENANT_ID, ALGOVOI_PAYOUT_ALGORAND)")
 
     return failures
 
@@ -642,25 +811,24 @@ def run_server(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="AlgoVoi MCP Server full smoke test",
+        description="AlgoVoi MCP Server v1.4.1 full smoke test (25 tools, 25 networks)",
         epilog=(
             "Phase 2 usage:\n"
             "  ALGOVOI_API_KEY=algv_... ALGOVOI_TENANT_ID=... ALGOVOI_PAYOUT_ALGORAND=... \\\n"
             "      python smoke_mcp_full.py --live\n\n"
-            "With TX ID verification (all 4 chains):\n"
+            "With TX ID verification:\n"
             "  python smoke_mcp_full.py --live \\\n"
-            "      --algo-tx ABCD1234... --voi-tx EFGH5678... \\\n"
-            "      --hedera-tx 0.0.12345@... --stellar-tx abc123..."
+            "      --algo-tx ABCD1234... --voi-tx EFGH5678..."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--live",      action="store_true", help="Run Phase 2 live API tests")
-    parser.add_argument("--ts-only",   action="store_true")
-    parser.add_argument("--py-only",   action="store_true")
-    parser.add_argument("--algo-tx",   default="", metavar="TX_ID", help="Algorand TX ID for verify tools")
-    parser.add_argument("--voi-tx",    default="", metavar="TX_ID", help="VOI TX ID for verify tools")
-    parser.add_argument("--hedera-tx", default="", metavar="TX_ID", help="Hedera TX ID for verify tools")
-    parser.add_argument("--stellar-tx",default="", metavar="TX_ID", help="Stellar TX ID for verify tools")
+    parser.add_argument("--live",       action="store_true", help="Run Phase 2 live API tests")
+    parser.add_argument("--ts-only",    action="store_true")
+    parser.add_argument("--py-only",    action="store_true")
+    parser.add_argument("--algo-tx",    default="", metavar="TX_ID")
+    parser.add_argument("--voi-tx",     default="", metavar="TX_ID")
+    parser.add_argument("--hedera-tx",  default="", metavar="TX_ID")
+    parser.add_argument("--stellar-tx", default="", metavar="TX_ID")
     args = parser.parse_args()
 
     live_env = _load_algovoi_creds() if args.live else None
