@@ -95,6 +95,9 @@ class AlgoVoiClient:
 
     # ── HTTP primitives ────────────────────────────────────────────────────
 
+    # Cloudflare (and some CDNs) block the default "Python-urllib/3.x" UA.
+    _UA = "algovoi-mcp/1.4.1"
+
     def _post(
         self,
         path: str,
@@ -106,6 +109,7 @@ class AlgoVoiClient:
             "Content-Type":  "application/json",
             "Authorization": f"Bearer {self.api_key}",
             "X-Tenant-Id":   self.tenant_id,
+            "User-Agent":    self._UA,
         }
         if extra_headers:
             headers.update(extra_headers)
@@ -131,6 +135,7 @@ class AlgoVoiClient:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "X-Tenant-Id":   self.tenant_id,
+                "User-Agent":    self._UA,
             },
         )
         try:
@@ -150,7 +155,7 @@ class AlgoVoiClient:
             url,
             data=json.dumps(body).encode(),
             method="POST",
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "User-Agent": self._UA},
         )
         try:
             with urlopen(req, timeout=self.timeout, context=self._ssl_ctx) as resp:  # noqa: S310
@@ -210,7 +215,7 @@ class AlgoVoiClient:
             return {"status": "invalid_token", "paid": False, "raw": {}}
         url = f"{self.api_base}/checkout/{quote(token, safe='')}/status"
         try:
-            req = Request(url, method="GET")
+            req = Request(url, method="GET", headers={"User-Agent": self._UA})
             with urlopen(req, timeout=15, context=self._ssl_ctx) as resp:  # noqa: S310
                 data = json.loads(resp.read())
                 status = str(data.get("status", "unknown"))
