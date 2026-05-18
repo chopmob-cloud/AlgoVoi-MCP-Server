@@ -9,11 +9,11 @@ Ships as **two packages**:
 | [**TypeScript**](./typescript) | `npm i -g @algovoi/mcp-server` | `npx -y @algovoi/mcp-server` |
 | [**Python**](./python) | `pip install algovoi-mcp` | `uvx algovoi-mcp` or `algovoi-mcp` |
 
-Both expose the **same 11 tools** and the same API surface — pick whichever runtime your client prefers.
+Both expose the **same 25 tools** and the same API surface — pick whichever runtime your client prefers.
 
 ---
 
-## 11 tools
+## 25 tools
 
 | # | Tool | What it does |
 |---|------|-------------|
@@ -28,6 +28,11 @@ Both expose the **same 11 tools** and the same API surface — pick whichever ru
 | 9 | `generate_x402_challenge` | x402 `X-Payment-Required` 402 headers + payload |
 | 10 | `generate_ap2_mandate` | AP2 v0.1 `PaymentMandate` for AI agent payment flows |
 | 11 | `verify_ap2_payment` | Verify an AP2 mandate payment receipt |
+| 12 | `try_mpp_endpoint` | Probe any URL for MPP/x402 payment requirements |
+| 13 | `discover_resources` | Browse the public AlgoVoi payment resource catalogue |
+| 14 | `screen_recipient` | Compliance screen a wallet address (sanctions / risk) |
+| 15 | `get_compliance_attestation` | Fetch AlgoVoi's live compliance posture document |
+| 16–25 | *(protocol helpers)* | Additional schema validators, challenge builders, and receipt verifiers for MPP, x402, and AP2 |
 
 Supported networks: **Algorand**, **VOI**, **Hedera**, **Stellar**, **Base**, **Solana**, **Tempo** (USDC on all seven).
 
@@ -76,7 +81,7 @@ Both packages read the same env vars:
 | `ALGOVOI_PAYOUT_STELLAR` | ✅* | Stellar payout address (`G...`) |
 | `ALGOVOI_PAYOUT_ADDRESS` | — | Universal fallback if per-chain vars are not set |
 | `ALGOVOI_WEBHOOK_SECRET` | — | For `verify_webhook` |
-| `ALGOVOI_API_BASE` | — | Override the AlgoVoi API base URL (default: `https://api1.ilovechicken.co.uk`) |
+| `ALGOVOI_API_BASE` | — | Override the AlgoVoi API base URL (default: `https://api.algovoi.co.uk`) |
 
 **\*** At least one per-chain address (or `ALGOVOI_PAYOUT_ADDRESS` as fallback) is required.
 
@@ -127,4 +132,4 @@ python smoke_stdio.py
 
 ---
 
-Licensed under the [Business Source License 1.1](../LICENSE).
+Licensed under the [MIT License](./LICENSE).
