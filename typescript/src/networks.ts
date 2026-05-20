@@ -29,6 +29,7 @@ export const NETWORKS = [
   "base_sepolia",
   "tempo_testnet",
   "solana_devnet",
+  "arc_testnet",
   "algorand_testnet_algo",
   "voi_testnet_voi",
   "hedera_testnet_hbar",
@@ -63,7 +64,7 @@ export const NETWORK_INFO: Record<
     asset_id: "302190",
     decimals: 6,
     caip2: "voi:mainnet",
-    description: "Aramid-bridged USDC on VOI (ARC-200 302190).",
+    description: "Aramid-bridged USDC on VOI (native ASA 302190).",
   },
   hedera_mainnet: {
     label: "Hedera",
@@ -210,6 +211,14 @@ export const NETWORK_INFO: Record<
     decimals: 6,
     caip2: "solana:devnet",
     description: "Circle USDC on Solana devnet (SPL 4zMMC9...). For development only.",
+  },
+  arc_testnet: {
+    label: "ARC Testnet",
+    asset: "USDC",
+    asset_id: "0x3600000000000000000000000000000000000000",
+    decimals: 18,
+    caip2: "eip155:5042002",
+    description: "USDC on ARC testnet (native gas token wrapper at 0x3600...0000, 18 decimals on-chain). For development only.",
   },
   algorand_testnet_algo: {
     label: "Algorand Testnet",

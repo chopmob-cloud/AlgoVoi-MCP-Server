@@ -136,7 +136,7 @@ const client = new AlgoVoiClient({
 // ── MCP server ────────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "algovoi-mcp-server", version: "1.4.1" },
+  { name: "algovoi-mcp-server", version: "1.5.0" },
   { capabilities: { tools: {} } }
 );
 

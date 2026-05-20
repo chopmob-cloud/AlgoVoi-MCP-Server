@@ -297,7 +297,7 @@ def run_phase1(session: McpSession, label: str) -> int:
         fail(f"[{label}] 01 tools/list — missing={missing} extra={extra}")
         failures += 1
 
-    # 02 — list_networks (13 mainnet + 12 testnet = 25 total)
+    # 02 — list_networks (13 mainnet + 12 testnet + 1 arc_testnet = 26 total)
     out = session.call_tool("list_networks")
     nets = out.get("networks", [])
     keys = {n["key"] for n in nets}
@@ -311,11 +311,13 @@ def run_phase1(session: McpSession, label: str) -> int:
         # USDC testnet
         "algorand_testnet", "voi_testnet", "hedera_testnet", "stellar_testnet",
         "base_sepolia", "tempo_testnet", "solana_devnet",
+        # ARC testnet
+        "arc_testnet",
         # Native testnet
         "algorand_testnet_algo", "voi_testnet_voi", "hedera_testnet_hbar",
         "stellar_testnet_xlm", "solana_devnet_sol",
     }
-    if len(nets) == 25 and expected_keys <= keys and all("caip2" in n and "asset_id" in n for n in nets):
+    if len(nets) == 26 and expected_keys <= keys and all("caip2" in n and "asset_id" in n for n in nets):
         algo      = next((n for n in nets if n["key"] == "algorand_mainnet"), None)
         algo_nat  = next((n for n in nets if n["key"] == "algorand_mainnet_algo"), None)
         base      = next((n for n in nets if n["key"] == "base_mainnet"), None)
@@ -326,12 +328,12 @@ def run_phase1(session: McpSession, label: str) -> int:
                 and base  and base["caip2"] == "eip155:8453"
                 and sol   and sol["caip2"] == "solana:mainnet"
                 and tempo and tempo["caip2"] == "eip155:4217"):
-            ok(f"[{label}] 02 list_networks — 25 networks (13 mainnet + 12 testnet), CAIP-2 correct")
+            ok(f"[{label}] 02 list_networks — 26 networks (13 mainnet + 12 testnet + arc_testnet), CAIP-2 correct")
         else:
             fail(f"[{label}] 02 list_networks — network fields wrong: algo={algo} base={base} sol={sol} tempo={tempo}")
             failures += 1
     else:
-        fail(f"[{label}] 02 list_networks — expected 25, got {len(nets)}: keys diff={expected_keys.symmetric_difference(keys)}")
+        fail(f"[{label}] 02 list_networks — expected 26, got {len(nets)}: keys diff={expected_keys.symmetric_difference(keys)}")
         failures += 1
 
     # 03 — generate_mpp_challenge
@@ -593,6 +595,10 @@ _NETWORKS = [
     "voi_mainnet",
     "hedera_mainnet",
     "stellar_mainnet",
+    "base_mainnet",
+    "solana_mainnet",
+    "tempo_mainnet",
+    # arc_testnet skipped — no payout configured for demo tenant
 ]
 _EXT_NETWORKS = ["algorand_mainnet", "voi_mainnet"]
 
@@ -605,8 +611,8 @@ def run_phase2(
     failures = 0
     tokens: dict[str, str] = {}
 
-    # 16 — create_payment_link on all 4 chains
-    print(f"\n  [{label}] -- create_payment_link (all 4 chains) --")
+    # 16 — create_payment_link on all 7 mainnet chains
+    print(f"\n  [{label}] -- create_payment_link (7 mainnet chains) --")
     for i, net in enumerate(_NETWORKS, start=1):
         out = session.call_tool("create_payment_link", {
             "amount":   0.01,
@@ -625,7 +631,7 @@ def run_phase2(
             failures += 1
 
     # 17 — verify_payment
-    print(f"\n  [{label}] -- verify_payment (all 4 chains) --")
+    print(f"\n  [{label}] -- verify_payment (7 mainnet chains) --")
     for i, net in enumerate(_NETWORKS, start=1):
         token = tokens.get(net)
         if not token:
