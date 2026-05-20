@@ -25,7 +25,7 @@ NetworkLiteral  = Literal[
     "base_mainnet_eth", "solana_mainnet_sol",
     # Testnet
     "algorand_testnet", "voi_testnet", "hedera_testnet", "stellar_testnet",
-    "base_sepolia", "tempo_testnet", "solana_devnet",
+    "base_sepolia", "tempo_testnet", "solana_devnet", "arc_testnet",
     "algorand_testnet_algo", "voi_testnet_voi", "hedera_testnet_hbar", "stellar_testnet_xlm",
     "solana_devnet_sol",
 ]
@@ -167,6 +167,19 @@ RECURRING_EVENT_TYPES: tuple[str, ...] = (
     "subscription.payment_failed",
 )
 
+# MPP-protocol subscription event types — emitted by the gateway when a
+# tenant's MPP subscription (Merchant Payment Protocol, draft
+# tempoxyz/mpp-specs#230) activates, charges a renewal period, is revoked
+# (manually or by first-pull finality drop / timeout), or expires.
+# Distinct from RECURRING_EVENT_TYPES above, which are the Recurr Tier 2
+# standing-authority lifecycle events.
+MPP_SUBSCRIPTION_EVENT_TYPES: tuple[str, ...] = (
+    "mpp_subscription.activated",
+    "mpp_subscription.charged",
+    "mpp_subscription.revoked",
+    "mpp_subscription.expired",
+)
+
 
 class CreateRecurringAuthorityInput(BaseModel):
     """Input for create_recurring_authority — opens a Tier 2 standing authority.
@@ -261,6 +274,67 @@ class TryMppEndpointInput(BaseModel):
         return v
 
 
+# ── MPP subscription tools (added v1.3.0 for tempoxyz/mpp-specs#230) ──
+#
+# These tools wrap the gateway's `/mpp/sub/...` subscription surface so
+# agents can probe, list, and cancel MPP-protocol subscriptions through
+# the MCP. Distinct from Tier 2 standing authorities (which are settled
+# off-chain in the platform DB) — MPP subscriptions live on-chain via
+# per-period pulls executed by the facilitator.
+
+class TryMppSubscriptionInput(BaseModel):
+    """Probe a public MPP subscription endpoint and parse the 402 envelope.
+
+    URL is typically `https://api.algovoi.co.uk/mpp/sub/{tenant_short_id}/{resource_id}`,
+    but works against any MPP subscription URL emitting the dual-envelope
+    402 response (RFC 9457 problem+json OR canonical x402 v2 strict).
+
+    Returns the parsed subscription terms — amount, network, asset,
+    payTo, periodCount, periodUnit, intent, challenge_id — so the agent
+    can present terms to the user before submitting an authority
+    credential.
+    """
+    model_config = _STRICT
+    url: str = Field(min_length=10, max_length=2048)
+
+    @field_validator("url")
+    @classmethod
+    def _must_be_https(cls, v: str) -> str:
+        if not v.startswith("https://"):
+            raise ValueError("url must start with https://")
+        return v
+
+
+class ListMppSubscriptionsInput(BaseModel):
+    """List MPP subscriptions for the configured tenant.
+
+    Calls the control-plane admin endpoint
+    `GET /internal/tenants/{tenant_id}/mpp-subscriptions` — requires an
+    API key with admin scope on this tenant. Filter by status to narrow
+    the result set.
+    """
+    model_config = _STRICT
+    tenant_id: str           = Field(min_length=1, max_length=64)
+    status:    Optional[str] = Field(
+        default=None,
+        description='Filter by status: pending / active / cancelled / expired / revoked',
+        min_length=1, max_length=32,
+    )
+    limit:     Optional[int] = Field(default=None, ge=1, le=200)
+
+
+class CancelMppSubscriptionInput(BaseModel):
+    """Cancel an MPP subscription.
+
+    Calls `POST /internal/tenants/{tenant_id}/mpp-subscriptions/{subscription_id}/cancel`.
+    The next due renewal pull will not execute. The current period's
+    access already paid is unaffected.
+    """
+    model_config = _STRICT
+    tenant_id:       str = Field(min_length=1, max_length=64)
+    subscription_id: str = Field(min_length=1, max_length=64)
+
+
 class DiscoverResourcesInput(BaseModel):
     model_config = _STRICT
 
@@ -307,12 +381,16 @@ SCHEMAS_BY_TOOL: dict[str, type[BaseModel]] = {
     "discover_resources":         DiscoverResourcesInput,
     "screen_recipient":           ScreenRecipientInput,
     "get_compliance_attestation": GetComplianceAttestationInput,
+    # MPP subscription lifecycle (added v1.3.0)
+    "try_mpp_subscription":       TryMppSubscriptionInput,
+    "list_mpp_subscriptions":     ListMppSubscriptionsInput,
+    "cancel_mpp_subscription":    CancelMppSubscriptionInput,
 }
 
 # Sanity check at import time — if anyone adds a new tool without the matching
 # schema, this surfaces immediately rather than at tool-call time.
 _EXPECTED = set(SCHEMAS_BY_TOOL.keys())
-assert len(_EXPECTED) == 25, f"expected 25 tool schemas, got {len(_EXPECTED)}"
+assert len(_EXPECTED) == 28, f"expected 28 tool schemas, got {len(_EXPECTED)}"
 # Cross-check each schema's network fields against the canonical NETWORKS tuple.
 for _n in (
     "algorand_mainnet", "voi_mainnet", "hedera_mainnet", "stellar_mainnet",
@@ -320,7 +398,7 @@ for _n in (
     "algorand_mainnet_algo", "voi_mainnet_voi", "hedera_mainnet_hbar", "stellar_mainnet_xlm",
     "base_mainnet_eth", "solana_mainnet_sol",
     "algorand_testnet", "voi_testnet", "hedera_testnet", "stellar_testnet",
-    "base_sepolia", "tempo_testnet", "solana_devnet",
+    "base_sepolia", "tempo_testnet", "solana_devnet", "arc_testnet",
     "algorand_testnet_algo", "voi_testnet_voi", "hedera_testnet_hbar", "stellar_testnet_xlm",
     "solana_devnet_sol",
 ):

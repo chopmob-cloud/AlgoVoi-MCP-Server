@@ -61,6 +61,9 @@ from .schemas import (
     SCHEMAS_BY_TOOL,
     ScreenRecipientInput,
     TryMppEndpointInput,
+    TryMppSubscriptionInput,
+    ListMppSubscriptionsInput,
+    CancelMppSubscriptionInput,
     SendA2aMessageInput,
     VerifyAp2PaymentInput,
     VerifyMppReceiptInput,
@@ -623,6 +626,159 @@ def tool_get_compliance_attestation(
         return {"error": "attestation_unavailable", "detail": str(exc)}
 
 
+# ── MPP subscription tools (v1.3.0 — tempoxyz/mpp-specs#230 surface) ────────
+#
+# Three tools exposing the MPP subscription lifecycle. The probe tool is
+# unauth (public hosted-checkout surface); the list + cancel tools use the
+# admin API endpoints on /internal/tenants/{tenant_id}/mpp-subscriptions
+# and require an API key with admin scope on that tenant.
+
+
+def _parse_mpp_subscription_402(body_bytes: bytes) -> dict:
+    """Decode the gateway's 402 body for an MPP subscription endpoint.
+
+    The gateway returns a dual envelope from /mpp/sub/{tenant_short_id}/{rid}:
+    either RFC 9457 problem+json (`type`/`title`/`accepts` at top level) or
+    canonical x402 v2 strict. Both shapes carry the same accepts[] array
+    where each leg has `network`, `amount`, `asset`, `payTo`, plus
+    `extra.periodCount`, `extra.periodUnit`, `extra.intent='subscription'`
+    for subscription resources.
+    """
+    try:
+        body = json.loads(body_bytes.decode("utf-8"))
+    except Exception:
+        return {"raw_body_preview": body_bytes.decode("utf-8", errors="replace")[:512]}
+
+    accepts = body.get("accepts")
+    if not isinstance(accepts, list):
+        # Some shapes nest under payment.accepts (older MPP dual envelope)
+        payment = body.get("payment") or {}
+        accepts = payment.get("accepts") if isinstance(payment, dict) else None
+
+    legs: list[dict] = []
+    for a in (accepts or []):
+        if not isinstance(a, dict):
+            continue
+        extra = a.get("extra") or {}
+        legs.append({
+            "network":      a.get("network"),
+            "amount":       a.get("amount") or a.get("maxAmountRequired"),
+            "asset":        a.get("asset"),
+            "payTo":        a.get("payTo") or a.get("payto"),
+            "scheme":       a.get("scheme"),
+            "resource":     a.get("resource"),
+            # Subscription-specific extras — None on one-shot challenges.
+            "period_count": extra.get("periodCount"),
+            "period_unit":  extra.get("periodUnit"),
+            "intent":       extra.get("intent") or a.get("intent"),
+            "asset_name":   extra.get("name"),
+            "decimals":     extra.get("decimals"),
+            "description":  extra.get("description"),
+        })
+
+    is_subscription = any(
+        (l.get("intent") == "subscription") or
+        (l.get("period_count") is not None and l.get("period_unit") is not None)
+        for l in legs
+    )
+
+    challenges = body.get("challenges") or []
+
+    return {
+        "envelope_type":  body.get("type"),
+        "is_subscription": is_subscription,
+        "accepts":        legs,
+        "challenge_ids":  [c.get("id") for c in challenges if isinstance(c, dict)],
+        "expires":        body.get("expires") or (challenges[0].get("expires") if challenges else None),
+    }
+
+
+def tool_try_mpp_subscription(_client: AlgoVoiClient, args: TryMppSubscriptionInput) -> dict:
+    """Probe a public MPP subscription URL and parse the 402 envelope.
+
+    Surfaces subscription-specific extras (periodCount, periodUnit, intent)
+    so the agent can present the subscription terms to the user before
+    submitting an authority credential.
+    """
+    req = Request(args.url, method="GET")
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", AlgoVoiClient._UA)
+    ctx = ssl.create_default_context()
+    try:
+        with urlopen(req, timeout=30, context=ctx) as resp:
+            body = resp.read()[:8192]
+            return {
+                "url":              args.url,
+                "status":           resp.status,
+                "payment_required": False,
+                "message":          "Resource is accessible without payment.",
+                "body_preview":     body.decode("utf-8", errors="replace")[:512],
+            }
+    except HTTPError as exc:
+        if exc.code != 402:
+            return {"url": args.url, "status": exc.code, "payment_required": False, "error": str(exc)}
+        parsed = _parse_mpp_subscription_402(exc.read()[:8192])
+        # Some legacy paths only carry the challenge in the WWW-Authenticate header.
+        www_auth = exc.headers.get("WWW-Authenticate", "")
+        if not parsed.get("accepts") and www_auth:
+            parsed.update(_parse_mpp_www_auth(www_auth))
+        return {
+            "url":              args.url,
+            "status":           402,
+            "payment_required": True,
+            **parsed,
+        }
+    except URLError as exc:
+        return {"url": args.url, "error": "unreachable", "detail": str(exc.reason)}
+
+
+def tool_list_mpp_subscriptions(client: AlgoVoiClient, args: ListMppSubscriptionsInput) -> dict:
+    """List MPP subscriptions for the tenant.
+
+    Calls `GET /internal/tenants/{tenant_id}/mpp-subscriptions` via the
+    authenticated client. Optional status filter and pagination limit.
+    """
+    path = f"/internal/tenants/{args.tenant_id}/mpp-subscriptions"
+    params: list[str] = []
+    if args.status:
+        params.append(f"status={args.status}")
+    if args.limit is not None:
+        params.append(f"limit={args.limit}")
+    if params:
+        path = f"{path}?{'&'.join(params)}"
+    try:
+        resp = client._get(path)
+    except HTTPError as exc:
+        return {"error": "list_failed", "status": exc.code, "detail": exc.read().decode("utf-8", errors="replace")[:300]}
+    except URLError as exc:
+        return {"error": "unreachable", "detail": str(exc.reason)}
+    subs = resp.get("subscriptions") if isinstance(resp, dict) else resp
+    if not isinstance(subs, list):
+        return resp if isinstance(resp, dict) else {"subscriptions": []}
+    return {"subscriptions": subs, "count": len(subs)}
+
+
+def tool_cancel_mpp_subscription(
+    client: AlgoVoiClient, args: CancelMppSubscriptionInput,
+) -> dict:
+    """Cancel an active MPP subscription.
+
+    The next due renewal pull will not execute; the current period is
+    already paid and unaffected. Returns the cancellation receipt.
+    """
+    path = f"/internal/tenants/{args.tenant_id}/mpp-subscriptions/{args.subscription_id}/cancel"
+    try:
+        return client._post(path, {})
+    except HTTPError as exc:
+        return {
+            "error":  "cancel_failed",
+            "status": exc.code,
+            "detail": exc.read().decode("utf-8", errors="replace")[:300],
+        }
+    except URLError as exc:
+        return {"error": "unreachable", "detail": str(exc.reason)}
+
+
 # ── Tool schemas (MCP wire format — JSON Schema) ──────────────────────────────
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -1163,6 +1319,83 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    # ── MPP subscription lifecycle (v1.3.0 — tempoxyz/mpp-specs#230) ──────────
+    {
+        "name": "try_mpp_subscription",
+        "description": (
+            "Probe a public MPP subscription URL (typically "
+            "https://api.algovoi.co.uk/mpp/sub/{tenant_short_id}/{resource_id}) and "
+            "parse the 402 dual-envelope (RFC 9457 problem+json or canonical x402 v2). "
+            "Returns subscription-specific terms: amount, network, asset, payTo, "
+            "periodCount, periodUnit, intent — so the agent can present the subscription "
+            "schedule and price to the user before submitting a signed authority credential. "
+            "No API key required."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type":        "string",
+                    "description": "Full https:// URL of the MPP subscription endpoint.",
+                },
+            },
+            "required":             ["url"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_mpp_subscriptions",
+        "description": (
+            "List the tenant's MPP subscriptions. Returns each subscription's id, status "
+            "(pending/active/cancelled/expired/revoked), resource_id, wallet_address, "
+            "payment_network, amount, period, first_pull_tx_id, first_pull_finalized_at, "
+            "next_due_at, and activated_at. Filter by status to narrow the set. Requires an "
+            "admin-scope API key on the tenant."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tenant_id": {
+                    "type":        "string",
+                    "description": "UUID of the tenant whose subscriptions to list.",
+                },
+                "status": {
+                    "type":        "string",
+                    "description": "Optional filter: pending / active / cancelled / expired / revoked.",
+                },
+                "limit": {
+                    "type":        "integer",
+                    "description": "Max subscriptions to return (1–200, default server-side).",
+                },
+            },
+            "required":             ["tenant_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "cancel_mpp_subscription",
+        "description": (
+            "Cancel an active MPP subscription. The next due renewal pull will not execute. "
+            "The current period's access (already paid) is unaffected. Idempotent — calling "
+            "cancel on an already-cancelled subscription is safe. Requires an admin-scope "
+            "API key on the tenant."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tenant_id": {
+                    "type":        "string",
+                    "description": "UUID of the tenant owning the subscription.",
+                },
+                "subscription_id": {
+                    "type":        "string",
+                    "description": "UUID of the MPP subscription to cancel.",
+                },
+            },
+            "required":             ["tenant_id", "subscription_id"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -1249,6 +1482,12 @@ def _dispatch(
         result = tool_screen_recipient(client, args)                       # type: ignore[arg-type]
     elif name == "get_compliance_attestation":
         result = tool_get_compliance_attestation(client, args)             # type: ignore[arg-type]
+    elif name == "try_mpp_subscription":
+        result = tool_try_mpp_subscription(client, args)                   # type: ignore[arg-type]
+    elif name == "list_mpp_subscriptions":
+        result = tool_list_mpp_subscriptions(client, args)                 # type: ignore[arg-type]
+    elif name == "cancel_mpp_subscription":
+        result = tool_cancel_mpp_subscription(client, args)                # type: ignore[arg-type]
     else:
         raise ValueError(f"unknown tool: {name}")
 
