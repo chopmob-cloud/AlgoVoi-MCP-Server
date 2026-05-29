@@ -13,6 +13,18 @@
 
 export const MAX_STR = 512;
 
+// Cryptographic fields that must never be truncated — truncation corrupts
+// base64url-encoded JWS signatures and other compact binary encodings.
+export const NO_TRUNCATE_KEYS: ReadonlySet<string> = new Set([
+  "compliance_receipt_jws",
+  "settlement_attestation_jws",
+  "refund_receipt_jws",
+  "cancellation_receipt_jws",
+  "ctq_response_jws",
+  "mandate_b64",
+  "proof",
+]);
+
 export const SENSITIVE_KEYS: ReadonlySet<string> = new Set([
   "mnemonic",
   "private_key",
@@ -39,11 +51,11 @@ export function scrub<T>(obj: T): T {
   return _scrub(obj) as T;
 }
 
-function _scrub(obj: unknown): unknown {
+function _scrub(obj: unknown, parentKey = ""): unknown {
   if (obj === null || obj === undefined) return obj;
 
   if (Array.isArray(obj)) {
-    return obj.map(_scrub);
+    return obj.map((x) => _scrub(x, parentKey));
   }
 
   if (typeof obj === "object") {
@@ -52,13 +64,16 @@ function _scrub(obj: unknown): unknown {
       if (SENSITIVE_KEYS.has(k.toLowerCase())) {
         out[k] = REDACTED;
       } else {
-        out[k] = _scrub(v);
+        out[k] = _scrub(v, k);
       }
     }
     return out;
   }
 
   if (typeof obj === "string" && obj.length > MAX_STR) {
+    if (NO_TRUNCATE_KEYS.has(parentKey.toLowerCase())) {
+      return obj; // preserve intact — truncation corrupts crypto encodings
+    }
     const extra = obj.length - MAX_STR;
     return obj.slice(0, MAX_STR) + `... [truncated ${extra} chars]`;
   }

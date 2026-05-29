@@ -56,6 +56,12 @@ import {
   discoverResources,
   screenRecipient,
   getComplianceAttestation,
+  complianceTrustQuery,
+  // MPP subscription lifecycle
+  tryMppSubscription,
+  listMppSubscriptions,
+  cancelMppSubscription,
+  stripSubstrate,
   TOOL_SCHEMAS,
 } from "./tools.js";
 
@@ -85,9 +91,12 @@ const WEBHOOK_SECRET = process.env.ALGOVOI_WEBHOOK_SECRET;
 
 // Per-chain payout addresses. Per-chain vars take priority; ALGOVOI_PAYOUT_ADDRESS
 // acts as a universal fallback for any chain not individually configured.
+// Testnet-specific vars allow separate testnet wallets; unset testnet keys
+// fall back to their mainnet sibling automatically.
 const PAYOUT_FALLBACK = optionalEnv("ALGOVOI_PAYOUT_ADDRESS");
 const PAYOUT_ADDRESSES: Record<string, string> = {};
 const CHAIN_ENV: [string, string][] = [
+  // Mainnet
   ["algorand_mainnet", "ALGOVOI_PAYOUT_ALGORAND"],
   ["voi_mainnet",      "ALGOVOI_PAYOUT_VOI"],
   ["hedera_mainnet",   "ALGOVOI_PAYOUT_HEDERA"],
@@ -95,17 +104,44 @@ const CHAIN_ENV: [string, string][] = [
   ["base_mainnet",     "ALGOVOI_PAYOUT_BASE"],
   ["solana_mainnet",   "ALGOVOI_PAYOUT_SOLANA"],
   ["tempo_mainnet",    "ALGOVOI_PAYOUT_TEMPO"],
+  // Testnet — dedicated vars; fall back to mainnet sibling if unset
+  ["algorand_testnet", "ALGOVOI_PAYOUT_ALGORAND_TESTNET"],
+  ["voi_testnet",      "ALGOVOI_PAYOUT_VOI_TESTNET"],
+  ["hedera_testnet",   "ALGOVOI_PAYOUT_HEDERA_TESTNET"],
+  ["stellar_testnet",  "ALGOVOI_PAYOUT_STELLAR_TESTNET"],
+  ["base_sepolia",     "ALGOVOI_PAYOUT_BASE_SEPOLIA"],
+  ["solana_devnet",    "ALGOVOI_PAYOUT_SOLANA_DEVNET"],
+  ["tempo_testnet",    "ALGOVOI_PAYOUT_TEMPO_TESTNET"],
+  ["arc_testnet",      "ALGOVOI_PAYOUT_ARC_TESTNET"],
 ];
+const MAINNET_SIBLING: Record<string, string> = {
+  algorand_testnet: "algorand_mainnet",
+  voi_testnet:      "voi_mainnet",
+  hedera_testnet:   "hedera_mainnet",
+  stellar_testnet:  "stellar_mainnet",
+  base_sepolia:     "base_mainnet",
+  solana_devnet:    "solana_mainnet",
+  tempo_testnet:    "tempo_mainnet",
+  arc_testnet:      "base_mainnet",
+};
 for (const [key, envVar] of CHAIN_ENV) {
   const v = optionalEnv(envVar) ?? PAYOUT_FALLBACK;
   if (v) PAYOUT_ADDRESSES[key] = v;
+}
+// Second pass: fill unset testnet keys from mainnet sibling
+for (const [testnetKey, mainnetKey] of Object.entries(MAINNET_SIBLING)) {
+  if (!PAYOUT_ADDRESSES[testnetKey] && PAYOUT_ADDRESSES[mainnetKey]) {
+    PAYOUT_ADDRESSES[testnetKey] = PAYOUT_ADDRESSES[mainnetKey];
+  }
 }
 if (Object.keys(PAYOUT_ADDRESSES).length === 0) {
   process.stderr.write(
     "\n[algovoi-mcp] no payout address configured.\n" +
     "Set ALGOVOI_PAYOUT_ALGORAND, ALGOVOI_PAYOUT_VOI, ALGOVOI_PAYOUT_HEDERA,\n" +
     "ALGOVOI_PAYOUT_STELLAR, ALGOVOI_PAYOUT_BASE, ALGOVOI_PAYOUT_SOLANA,\n" +
-    "ALGOVOI_PAYOUT_TEMPO (or ALGOVOI_PAYOUT_ADDRESS as a universal fallback).\n\n"
+    "ALGOVOI_PAYOUT_TEMPO (or ALGOVOI_PAYOUT_ADDRESS as a universal fallback).\n" +
+    "Testnet: ALGOVOI_PAYOUT_ALGORAND_TESTNET, _VOI_TESTNET, _HEDERA_TESTNET,\n" +
+    "  _STELLAR_TESTNET, _BASE_SEPOLIA, _SOLANA_DEVNET, _TEMPO_TESTNET, _ARC_TESTNET.\n\n"
   );
   process.exit(2);
 }
@@ -126,17 +162,31 @@ function parseEnabledTools(raw: string | undefined): Set<string> | null {
 
 const ENABLED_TOOLS = parseEnabledTools(process.env.MCP_ENABLED_TOOLS);
 
+// Response model: substrate (default) | standard. Controls whether tool
+// results carry AlgoVoi substrate receipts or the bare standard shape.
+let MODE: "substrate" | "standard" = "substrate";
+const rawMode = (process.env.ALGOVOI_MODE ?? "substrate").trim().toLowerCase();
+if (rawMode === "standard" || rawMode === "substrate") {
+  MODE = rawMode;
+} else if (rawMode) {
+  process.stderr.write(
+    `[algovoi-mcp] warning: invalid ALGOVOI_MODE=${JSON.stringify(rawMode)} — ` +
+      `expected 'standard' or 'substrate'; defaulting to 'substrate'\n`
+  );
+}
+
 const client = new AlgoVoiClient({
   apiBase:         API_BASE,
   apiKey:          API_KEY,
   tenantId:        TENANT_ID,
   payoutAddresses: PAYOUT_ADDRESSES,
+  mode:            MODE,
 });
 
 // ── MCP server ────────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "algovoi-mcp-server", version: "1.5.0" },
+  { name: "algovoi-mcp-server", version: "1.7.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -175,7 +225,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   const start = performance.now();
   try {
-    const result = scrub(await dispatch(name, args));
+    let dispatched = await dispatch(name, args);
+    // ALGOVOI_MODE=standard — strip substrate-only keys before redaction.
+    if (MODE === "standard") dispatched = stripSubstrate(dispatched);
+    const result = scrub(dispatched);
     logCall({ tool_name: name, args, status: "ok", duration_ms: performance.now() - start });
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -263,6 +316,15 @@ async function dispatch(
       return screenRecipient(client, args as any);
     case "get_compliance_attestation":
       return getComplianceAttestation(client, args as any);
+    case "compliance_trust_query":
+      return complianceTrustQuery(client, args as any);
+    // MPP subscription lifecycle
+    case "try_mpp_subscription":
+      return tryMppSubscription(client, args as any);
+    case "list_mpp_subscriptions":
+      return listMppSubscriptions(client, args as any);
+    case "cancel_mpp_subscription":
+      return cancelMppSubscription(client, args as any);
     default:
       throw new Error(`unknown tool: ${name}`);
   }
@@ -275,7 +337,7 @@ async function main() {
   await server.connect(transport);
   process.stderr.write(
     `[algovoi-mcp] connected on stdio — ${visibleSchemas.length} tools ready, ` +
-      `webhook_secret=${WEBHOOK_SECRET ? "set" : "unset"}\n`
+      `mode=${MODE}, webhook_secret=${WEBHOOK_SECRET ? "set" : "unset"}\n`
   );
 }
 

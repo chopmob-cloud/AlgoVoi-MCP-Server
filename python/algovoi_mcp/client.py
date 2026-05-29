@@ -74,6 +74,7 @@ class AlgoVoiClient:
         tenant_id: str,
         payout_addresses: dict[str, str],
         timeout: int = 30,
+        mode: str = "substrate",
     ) -> None:
         if not api_base.startswith("https://"):
             raise ValueError("api_base must be an https:// URL")
@@ -82,6 +83,10 @@ class AlgoVoiClient:
         self.tenant_id        = tenant_id
         self.payout_addresses = payout_addresses
         self.timeout          = timeout
+        # Response model: "substrate" (default) emits AlgoVoi substrate receipts
+        # (action_ref, signed compliance/settlement receipts, composite trust hash);
+        # "standard" strips them, returning the bare x402/MPP/AP2 standard shape.
+        self.mode             = mode if mode in ("standard", "substrate") else "substrate"
         # §4.6 — TLS 1.3 minimum. Fails loudly on a weaker handshake
         # instead of silently negotiating down.
         self._ssl_ctx       = ssl.create_default_context()
@@ -96,7 +101,7 @@ class AlgoVoiClient:
     # ── HTTP primitives ────────────────────────────────────────────────────
 
     # Cloudflare (and some CDNs) block the default "Python-urllib/3.x" UA.
-    _UA = "algovoi-mcp/1.5.0"
+    _UA = "algovoi-mcp/1.7.0"
 
     def _post(
         self,

@@ -339,6 +339,19 @@ class DiscoverResourcesInput(BaseModel):
     model_config = _STRICT
 
 
+class ComplianceTrustQueryInput(BaseModel):
+    """Input for compliance_trust_query — composite trust verdict over a receipt chain.
+
+    Submit decoded receipt objects (compliance receipts, settlement attestations,
+    refund receipts, or cancellation receipts) and receive a composite trust
+    verdict (TRUSTED/PROVISIONAL/INSUFFICIENT_EVIDENCE/UNTRUSTED) plus a
+    content-addressed composite_hash and a signed CtqResponse.
+    No API key required; rate-limited 30/min.
+    """
+    model_config = ConfigDict(strict=False, extra="forbid")  # receipts are open dicts
+    receipts: list[dict] = Field(default_factory=list, max_length=50)
+
+
 class ScreenRecipientInput(BaseModel):
     model_config = _STRICT
     recipient_address: str           = Field(min_length=4, max_length=128)
@@ -381,6 +394,7 @@ SCHEMAS_BY_TOOL: dict[str, type[BaseModel]] = {
     "discover_resources":         DiscoverResourcesInput,
     "screen_recipient":           ScreenRecipientInput,
     "get_compliance_attestation": GetComplianceAttestationInput,
+    "compliance_trust_query":     ComplianceTrustQueryInput,
     # MPP subscription lifecycle (added v1.3.0)
     "try_mpp_subscription":       TryMppSubscriptionInput,
     "list_mpp_subscriptions":     ListMppSubscriptionsInput,
@@ -390,7 +404,7 @@ SCHEMAS_BY_TOOL: dict[str, type[BaseModel]] = {
 # Sanity check at import time — if anyone adds a new tool without the matching
 # schema, this surfaces immediately rather than at tool-call time.
 _EXPECTED = set(SCHEMAS_BY_TOOL.keys())
-assert len(_EXPECTED) == 28, f"expected 28 tool schemas, got {len(_EXPECTED)}"
+assert len(_EXPECTED) == 29, f"expected 29 tool schemas, got {len(_EXPECTED)}"
 # Cross-check each schema's network fields against the canonical NETWORKS tuple.
 for _n in (
     "algorand_mainnet", "voi_mainnet", "hedera_mainnet", "stellar_mainnet",

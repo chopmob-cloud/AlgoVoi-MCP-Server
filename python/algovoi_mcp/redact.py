@@ -21,6 +21,20 @@ from typing import Any
 
 MAX_STR = 512
 
+# Cryptographic fields that must never be truncated — truncation corrupts
+# base64url-encoded JWS signatures and other compact binary encodings.
+NO_TRUNCATE_KEYS: frozenset[str] = frozenset(
+    {
+        "compliance_receipt_jws",
+        "settlement_attestation_jws",
+        "refund_receipt_jws",
+        "cancellation_receipt_jws",
+        "ctq_response_jws",
+        "mandate_b64",
+        "proof",
+    }
+)
+
 SENSITIVE_KEYS: frozenset[str] = frozenset(
     {
         "mnemonic",
@@ -47,14 +61,15 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
 _REDACTED = "[REDACTED]"
 
 
-def scrub(obj: Any) -> Any:
+def scrub(obj: Any, _key: str = "") -> Any:
     """
     Recursively sanitise ``obj`` for safe inclusion in tool responses.
 
     - Dict keys matched (case-insensitive, exact match) against
       :data:`SENSITIVE_KEYS` have their values replaced with ``"[REDACTED]"``.
     - String values longer than :data:`MAX_STR` are truncated with a visible
-      ``"... [truncated N chars]"`` suffix.
+      ``"... [truncated N chars]"`` suffix, UNLESS the parent key is in
+      :data:`NO_TRUNCATE_KEYS` (cryptographic fields whose length is required).
     - Lists and nested dicts are walked recursively.
     - All other types pass through unchanged.
     """
@@ -64,12 +79,14 @@ def scrub(obj: Any) -> Any:
             if isinstance(k, str) and k.lower() in SENSITIVE_KEYS:
                 out[k] = _REDACTED
             else:
-                out[k] = scrub(v)
+                out[k] = scrub(v, _key=k if isinstance(k, str) else "")
         return out
     if isinstance(obj, list):
-        return [scrub(x) for x in obj]
+        return [scrub(x, _key=_key) for x in obj]
     if isinstance(obj, tuple):
-        return tuple(scrub(x) for x in obj)
+        return tuple(scrub(x, _key=_key) for x in obj)
     if isinstance(obj, str) and len(obj) > MAX_STR:
+        if _key.lower() in NO_TRUNCATE_KEYS:
+            return obj  # preserve intact — truncation corrupts crypto encodings
         return obj[:MAX_STR] + f"... [truncated {len(obj) - MAX_STR} chars]"
     return obj

@@ -1,8 +1,8 @@
 {
   "name": "@algovoi/mcp-server",
-  "version": "1.5.0",
+  "version": "1.7.0",
   "mcpName": "io.github.chopmob-cloud/algovoi-mcp-server",
-  "description": "MCP server for AlgoVoi — create crypto payment links, verify payments, probe MPP endpoints (including MPP subscription lifecycle), screen recipients, and generate MPP / x402 challenges from any MCP client. Supports 28 tools across all 8 AlgoVoi chains: Algorand, VOI, Hedera, Stellar, Base, Solana, Tempo, and ARC testnet.",
+  "description": "MCP server for AlgoVoi — create crypto payment links, verify payments, probe MPP endpoints (including MPP subscription lifecycle), screen recipients, compliance trust queries, and generate MPP / x402 challenges from any MCP client. Supports 29 tools across all 8 AlgoVoi chains: Algorand, VOI, Hedera, Stellar, Base, Solana, Tempo, and ARC testnet. Selectable response model via ALGOVOI_MODE: 'substrate' (AlgoVoi signed receipts) or 'standard' (bare x402/MPP/AP2).",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",

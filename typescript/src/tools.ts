@@ -49,6 +49,10 @@ import type {
   VerifyPaymentInput,
   VerifyWebhookInput,
   VerifyX402ProofInput,
+  ComplianceTrustQueryInput,
+  TryMppSubscriptionInput,
+  ListMppSubscriptionsInput,
+  CancelMppSubscriptionInput,
 } from "./schemas.js";
 
 const MAX_WEBHOOK_BODY = 64 * 1024;
@@ -103,12 +107,21 @@ export async function verifyPayment(
 ) {
   if (args.tx_id) {
     const resp     = await client.verifyExtensionPayment(args.token, args.tx_id);
-    const verified = resp.success === true;
-    return {
+    // /checkout/{token}/verify returns {status: "paid", ...}; older/extension
+    // shapes used {success: true}. Accept either so hosted checkout verifies
+    // report correctly.
+    const verified = resp.success === true || resp.status === "paid";
+    const result: Record<string, unknown> = {
       paid:   verified,
       status: verified ? "verified" : "unverified",
       error:  verified ? null : ((resp.error as string) ?? null),
     };
+    // Surface substrate settlement attestation when present (substrate mode).
+    if (resp.settlement_attestation) {
+      result.settlement_attestation     = resp.settlement_attestation;
+      result.settlement_attestation_jws = resp.settlement_attestation_jws ?? null;
+    }
+    return result;
   }
   const resp = await client.verifyHostedReturn(args.token);
   return { paid: resp.paid, status: resp.status };
@@ -641,6 +654,155 @@ export async function getComplianceAttestation(
     return { error: "attestation_unavailable", status: res.status };
   }
   return res.json();
+}
+
+// ── compliance_trust_query ─────────────────────────────────────────────────────
+
+export async function complianceTrustQuery(
+  client: AlgoVoiClient,
+  args: ComplianceTrustQueryInput,
+): Promise<unknown> {
+  const res = await fetch(`${client.apiBase}/compliance/trust-query`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body:    JSON.stringify({ receipts: args.receipts }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    return { error: "trust_query_failed", status: res.status, detail: detail.slice(0, 300) };
+  }
+  return res.json();
+}
+
+// ── MPP subscription lifecycle ──────────────────────────────────────────────────
+
+/** Decode the gateway's 402 body for an MPP subscription endpoint. */
+function _parseMppSubscription402(bodyText: string): Record<string, unknown> {
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(bodyText) as Record<string, unknown>;
+  } catch {
+    return { raw_body_preview: bodyText.slice(0, 512) };
+  }
+  let accepts = body.accepts as unknown[] | undefined;
+  if (!Array.isArray(accepts)) {
+    const payment = body.payment as Record<string, unknown> | undefined;
+    accepts = payment && Array.isArray(payment.accepts) ? (payment.accepts as unknown[]) : undefined;
+  }
+  const legs: Record<string, unknown>[] = [];
+  for (const a of accepts ?? []) {
+    if (a === null || typeof a !== "object" || Array.isArray(a)) continue;
+    const entry = a as Record<string, unknown>;
+    const extra = (entry.extra ?? {}) as Record<string, unknown>;
+    legs.push({
+      network:      entry.network,
+      amount:       entry.amount ?? entry.maxAmountRequired,
+      asset:        entry.asset,
+      payTo:        entry.payTo ?? entry.payto,
+      scheme:       entry.scheme,
+      resource:     entry.resource,
+      period_count: extra.periodCount,
+      period_unit:  extra.periodUnit,
+      intent:       extra.intent ?? entry.intent,
+      asset_name:   extra.name,
+      decimals:     extra.decimals,
+      description:  extra.description,
+    });
+  }
+  const isSubscription = legs.some(
+    (l) => l.intent === "subscription" || (l.period_count !== undefined && l.period_unit !== undefined),
+  );
+  const challenges = (body.challenges ?? []) as Record<string, unknown>[];
+  return {
+    envelope_type:   body.type,
+    is_subscription: isSubscription,
+    accepts:         legs,
+    challenge_ids:   challenges.filter((c) => c && typeof c === "object").map((c) => c.id),
+    expires:         body.expires ?? (challenges[0]?.expires ?? null),
+  };
+}
+
+export async function tryMppSubscription(
+  _client: AlgoVoiClient,
+  args: TryMppSubscriptionInput,
+): Promise<unknown> {
+  try {
+    const res = await fetch(args.url, { headers: { Accept: "application/json" } });
+    if (res.status === 402) {
+      const text = (await res.text()).slice(0, 8192);
+      const parsed = _parseMppSubscription402(text);
+      return { url: args.url, status: 402, payment_required: true, ...parsed };
+    }
+    const body = (await res.text()).slice(0, 512);
+    return {
+      url:              args.url,
+      status:           res.status,
+      payment_required: false,
+      message:          "Resource is accessible without payment.",
+      body_preview:     body,
+    };
+  } catch (err) {
+    return { url: args.url, error: "unreachable", detail: String(err) };
+  }
+}
+
+export async function listMppSubscriptions(
+  client: AlgoVoiClient,
+  args: ListMppSubscriptionsInput,
+): Promise<unknown> {
+  try {
+    const resp = await client.listMppSubscriptions({
+      tenant_id: args.tenant_id,
+      status:    args.status,
+      limit:     args.limit,
+    });
+    const subs = (resp as Record<string, unknown>)?.subscriptions ?? resp;
+    if (Array.isArray(subs)) return { subscriptions: subs, count: subs.length };
+    return resp ?? { subscriptions: [] };
+  } catch {
+    return { error: "list_failed" };
+  }
+}
+
+export async function cancelMppSubscription(
+  client: AlgoVoiClient,
+  args: CancelMppSubscriptionInput,
+): Promise<unknown> {
+  try {
+    return await client.cancelMppSubscription({
+      tenant_id:       args.tenant_id,
+      subscription_id: args.subscription_id,
+    });
+  } catch {
+    return { error: "cancel_failed" };
+  }
+}
+
+// ── ALGOVOI_MODE response-model toggle ──────────────────────────────────────────
+//
+// substrate (default): tool results carry AlgoVoi substrate primitives.
+// standard: these substrate-only keys are stripped, leaving the bare
+//   x402 / MPP / AP2 standard shape. The strip is purely presentation-layer.
+
+export const SUBSTRATE_FIELDS: ReadonlySet<string> = new Set([
+  "action_ref",
+  "compliance_receipt", "compliance_receipt_jws",
+  "settlement_attestation", "settlement_attestation_jws",
+  "refund_receipt", "refund_receipt_jws",
+  "cancellation_receipt", "cancellation_receipt_jws",
+  "composite_hash", "ctq_response", "ctq_response_jws",
+]);
+
+/** Remove top-level substrate-only keys for ALGOVOI_MODE=standard. */
+export function stripSubstrate(result: unknown): unknown {
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    return result;
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(result as Record<string, unknown>)) {
+    if (!SUBSTRATE_FIELDS.has(k)) out[k] = v;
+  }
+  return out;
 }
 
 // ── MPP consumer probe ────────────────────────────────────────────────────────
@@ -1233,6 +1395,83 @@ export const TOOL_SCHEMAS = [
     inputSchema: {
       type:                 "object",
       properties:           {},
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "compliance_trust_query",
+    description:
+      "Composite trust verdict (TRUSTED / PROVISIONAL / INSUFFICIENT_EVIDENCE / UNTRUSTED) " +
+      "over a chain of substrate receipts. Submit decoded receipt objects from " +
+      "screen_recipient (compliance_receipt field) and verify_payment (settlement_attestation " +
+      "field) to get a composite verdict covering the full pre-payment + post-settlement " +
+      "lifecycle. Returns composite_hash (deterministic, order-invariant SHA-256 over JCS-sorted " +
+      "rows) and a signed CtqResponse (EdDSA Ed25519 JWS). Empty receipts → INSUFFICIENT_EVIDENCE. " +
+      "Any DENY/REVERSED/COMPLIANCE_TERMINATED → UNTRUSTED. REFER/PENDING_FINALITY → PROVISIONAL. " +
+      "All ALLOW/SETTLED → TRUSTED. No API key required; rate-limited 30/min.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        receipts: {
+          type:        "array",
+          items:       { type: "object" },
+          description: "List of decoded receipt objects (compliance_receipt from screen_recipient, " +
+                       "settlement_attestation from verify_payment). Max 50 receipts per call.",
+          maxItems:    50,
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "try_mpp_subscription",
+    description:
+      "Probe a public MPP subscription URL (typically " +
+      "https://api.algovoi.co.uk/mpp/sub/{tenant_short_id}/{resource_id}) and parse the " +
+      "402 dual-envelope (RFC 9457 problem+json or canonical x402 v2). Returns " +
+      "subscription-specific terms: amount, network, asset, payTo, periodCount, periodUnit, " +
+      "intent — so the agent can present the subscription schedule and price before submitting " +
+      "a signed authority credential. No API key required.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Full https:// URL of the MPP subscription endpoint." },
+      },
+      required:             ["url"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_mpp_subscriptions",
+    description:
+      "List the tenant's MPP subscriptions. Returns each subscription's id, status " +
+      "(pending/active/cancelled/expired/revoked), resource_id, wallet_address, payment_network, " +
+      "amount, period, next_due_at, and activated_at. Filter by status to narrow the set. " +
+      "Requires an admin-scope API key on the tenant.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant_id: { type: "string", description: "UUID of the tenant whose subscriptions to list." },
+        status:    { type: "string", description: "Optional filter: pending / active / cancelled / expired / revoked." },
+        limit:     { type: "integer", description: "Max subscriptions to return (1–200)." },
+      },
+      required:             ["tenant_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cancel_mpp_subscription",
+    description:
+      "Cancel an active MPP subscription. The next due renewal pull will not execute. The " +
+      "current period's access (already paid) is unaffected. Idempotent — cancelling an " +
+      "already-cancelled subscription is safe. Requires an admin-scope API key on the tenant.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant_id:       { type: "string", description: "UUID of the tenant owning the subscription." },
+        subscription_id: { type: "string", description: "UUID of the MPP subscription to cancel." },
+      },
+      required:             ["tenant_id", "subscription_id"],
       additionalProperties: false,
     },
   },

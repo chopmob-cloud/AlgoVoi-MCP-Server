@@ -2,7 +2,7 @@
 Stdio smoke test for both AlgoVoi MCP servers (TypeScript + Python).
 
 Starts each server as a subprocess with fake env vars, speaks the MCP JSON-RPC
-2.0 protocol over stdin/stdout, and asserts all 11 tools are listed on each side.
+2.0 protocol over stdin/stdout, and asserts all 29 tools are listed on each side.
 
 Run:
     python smoke_stdio.py
@@ -19,17 +19,41 @@ from pathlib import Path
 
 
 EXPECTED_TOOLS = {
+    # Core payment
     "create_payment_link",
     "verify_payment",
     "prepare_extension_payment",
     "verify_webhook",
     "list_networks",
+    # x402 / MPP / AP2
     "generate_mpp_challenge",
     "verify_mpp_receipt",
     "verify_x402_proof",
     "generate_x402_challenge",
     "generate_ap2_mandate",
     "verify_ap2_payment",
+    # MPP subscriptions
+    "try_mpp_subscription",
+    "list_mpp_subscriptions",
+    "cancel_mpp_subscription",
+    "try_mpp_endpoint",
+    # Recurr authorities
+    "create_recurring_authority",
+    "confirm_authority",
+    "revoke_authority",
+    "pause_authority",
+    "resume_authority",
+    "get_authority",
+    "list_authorities",
+    "manual_pull",
+    # Compliance / substrate
+    "screen_recipient",
+    "compliance_trust_query",
+    "get_compliance_attestation",
+    # A2A / discovery
+    "discover_resources",
+    "fetch_agent_card",
+    "send_a2a_message",
 }
 
 
@@ -101,7 +125,7 @@ def run_ts() -> int:
         if extra:
             fail(f"unexpected extra tools: {extra}")
             return 1
-        ok(f"all 11 tools listed: {sorted(tools)}")
+        ok(f"all 29 tools listed: {sorted(tools)}")
         return 0
     except Exception as exc:
         fail(f"{exc}")
@@ -150,7 +174,7 @@ def run_py() -> int:
         if extra:
             fail(f"unexpected extra tools: {extra}")
             return 1
-        ok(f"all 11 tools listed: {sorted(tools)}")
+        ok(f"all 29 tools listed: {sorted(tools)}")
         return 0
     except Exception as exc:
         fail(f"{exc}")

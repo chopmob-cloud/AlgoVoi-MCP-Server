@@ -57,6 +57,8 @@ export interface AlgoVoiClientConfig {
   tenantId: string;
   /** Per-chain payout addresses. Keys are network keys (e.g. "algorand_mainnet"). */
   payoutAddresses: Record<string, string>;
+  /** Response model: "substrate" (default, AlgoVoi signed receipts) | "standard" (bare). */
+  mode?: "substrate" | "standard";
 }
 
 export interface CheckoutLink {
@@ -583,6 +585,34 @@ export class AlgoVoiClient {
     });
   }
 
+  // ── MPP subscription lifecycle ────────────────────────────────────────
+
+  /** List the tenant's MPP subscriptions (admin-scope key required). */
+  async listMppSubscriptions(args: {
+    tenant_id: string;
+    status?: string;
+    limit?: number;
+  }): Promise<unknown> {
+    let path = `/internal/tenants/${encodeURIComponent(args.tenant_id)}/mpp-subscriptions`;
+    const params = new URLSearchParams();
+    if (args.status) params.set("status", args.status);
+    if (args.limit !== undefined) params.set("limit", String(args.limit));
+    const qs = params.toString();
+    if (qs) path += `?${qs}`;
+    return this.get<unknown>(path);
+  }
+
+  /** Cancel an active MPP subscription (admin-scope key required). */
+  async cancelMppSubscription(args: {
+    tenant_id: string;
+    subscription_id: string;
+  }): Promise<unknown> {
+    return this.post<unknown>(
+      `/internal/tenants/${encodeURIComponent(args.tenant_id)}/mpp-subscriptions/${encodeURIComponent(args.subscription_id)}/cancel`,
+      {},
+    );
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────
 
   extractToken(checkoutUrl: string): string {
@@ -607,5 +637,10 @@ export class AlgoVoiClient {
 
   get apiBase(): string {
     return this.cfg.apiBase;
+  }
+
+  /** Response model — "substrate" (default) or "standard". */
+  get mode(): "substrate" | "standard" {
+    return this.cfg.mode === "standard" ? "standard" : "substrate";
   }
 }

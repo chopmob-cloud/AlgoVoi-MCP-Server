@@ -1,10 +1,4 @@
-> **AlgoVoi is available for acquisition** — [docs.algovoi.co.uk/acquisition](https://docs.algovoi.co.uk/acquisition)
-
----
-
 # AlgoVoi MCP Server
-
-[![Agent Trust Bench](https://img.shields.io/badge/Agent_Trust_Bench-128%2F138_Passed-238636)](https://agent-trust-bench.algovoi.co.uk)
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes AlgoVoi's payment infrastructure as tools any MCP client can call — Claude Desktop, Claude Code, Cursor, Windsurf, or any other MCP-compatible assistant.
 
@@ -96,27 +90,16 @@ Both packages read the same env vars:
 |-----|----------|---------|
 | `ALGOVOI_API_KEY` | ✅ | `algv_...` API key from the AlgoVoi dashboard |
 | `ALGOVOI_TENANT_ID` | ✅ | Tenant UUID from the AlgoVoi dashboard |
-| `ALGOVOI_PAYOUT_ALGORAND` | ✅* | Algorand mainnet payout wallet address |
-| `ALGOVOI_PAYOUT_VOI` | ✅* | VOI mainnet payout wallet address |
-| `ALGOVOI_PAYOUT_HEDERA` | ✅* | Hedera mainnet payout account (e.g. `0.0.123456`) |
-| `ALGOVOI_PAYOUT_STELLAR` | ✅* | Stellar mainnet payout address (`G...`) |
-| `ALGOVOI_PAYOUT_BASE` | ✅* | Base mainnet payout address (`0x...`) |
-| `ALGOVOI_PAYOUT_SOLANA` | ✅* | Solana mainnet payout address |
-| `ALGOVOI_PAYOUT_TEMPO` | ✅* | Tempo mainnet payout address (`0x...`) |
+| `ALGOVOI_PAYOUT_ALGORAND` | ✅* | Algorand payout wallet address |
+| `ALGOVOI_PAYOUT_VOI` | ✅* | VOI payout wallet address |
+| `ALGOVOI_PAYOUT_HEDERA` | ✅* | Hedera payout account (e.g. `0.0.123456`) |
+| `ALGOVOI_PAYOUT_STELLAR` | ✅* | Stellar payout address (`G...`) |
 | `ALGOVOI_PAYOUT_ADDRESS` | — | Universal fallback if per-chain vars are not set |
-| `ALGOVOI_PAYOUT_ALGORAND_TESTNET` | — | Algorand testnet payout address (falls back to mainnet if unset) |
-| `ALGOVOI_PAYOUT_VOI_TESTNET` | — | VOI testnet payout address |
-| `ALGOVOI_PAYOUT_HEDERA_TESTNET` | — | Hedera testnet payout account |
-| `ALGOVOI_PAYOUT_STELLAR_TESTNET` | — | Stellar testnet payout address |
-| `ALGOVOI_PAYOUT_BASE_SEPOLIA` | — | Base Sepolia payout address |
-| `ALGOVOI_PAYOUT_SOLANA_DEVNET` | — | Solana devnet payout address |
-| `ALGOVOI_PAYOUT_TEMPO_TESTNET` | — | Tempo testnet payout address |
-| `ALGOVOI_PAYOUT_ARC_TESTNET` | — | ARC testnet payout address |
 | `ALGOVOI_WEBHOOK_SECRET` | — | For `verify_webhook` |
 | `ALGOVOI_API_BASE` | — | Override the AlgoVoi API base URL (default: `https://api.algovoi.co.uk`) |
 | `ALGOVOI_MODE` | — | Response model: `substrate` (default) or `standard` — see "Response model" above |
 
-**\*** At least one per-chain address (or `ALGOVOI_PAYOUT_ADDRESS` as fallback) is required. Testnet vars are optional — if unset, the mainnet sibling address is reused.
+**\*** At least one per-chain address (or `ALGOVOI_PAYOUT_ADDRESS` as fallback) is required.
 
 **Auth is env-var only.** Secrets never pass through tool arguments — the MCP client never sees the API key.
 

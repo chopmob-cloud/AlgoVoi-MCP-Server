@@ -21,6 +21,10 @@ import {
   parseVerifyPayment,
   parseVerifyWebhook,
   parseVerifyX402Proof,
+  parseComplianceTrustQuery,
+  parseTryMppSubscription,
+  parseListMppSubscriptions,
+  parseCancelMppSubscription,
   PARSERS,
 } from "../src/schemas.js";
 import {
@@ -35,6 +39,7 @@ import {
   generateX402Challenge,
   generateAp2Mandate,
   verifyAp2Payment,
+  stripSubstrate,
   TOOL_SCHEMAS,
   _resetIdempotencyCacheForTests,
 } from "../src/tools.js";
@@ -75,8 +80,19 @@ afterEach(() => {
 // ── TOOL_SCHEMAS (3 tests) ────────────────────────────────────────────────────
 
 describe("TOOL_SCHEMAS", () => {
-  it("has exactly 11 tools", () => {
-    expect(TOOL_SCHEMAS).toHaveLength(11);
+  it("has exactly 29 tools", () => {
+    expect(TOOL_SCHEMAS).toHaveLength(29);
+  });
+  it("includes compliance_trust_query + MPP subscription tools", () => {
+    const names = TOOL_SCHEMAS.map((t) => t.name);
+    for (const n of [
+      "compliance_trust_query",
+      "try_mpp_subscription",
+      "list_mpp_subscriptions",
+      "cancel_mpp_subscription",
+    ]) {
+      expect(names).toContain(n);
+    }
   });
   it("every tool has name, description, inputSchema, additionalProperties=false", () => {
     for (const t of TOOL_SCHEMAS) {
@@ -129,7 +145,7 @@ describe("parsers (extra=forbid)", () => {
     expect(() =>
       parseCreatePaymentLink({
         amount: 1, currency: "USD", label: "x",
-        network: "solana_mainnet",
+        network: "ethereum_mainnet",
       })
     ).toThrow(ValidationError);
   });
@@ -522,8 +538,8 @@ describe("verifyWebhook", () => {
 // ── list_networks (2 tests) ───────────────────────────────────────────────────
 
 describe("listNetworks", () => {
-  it("returns 16 networks (8 mainnet + 8 testnet)", () => {
-    expect(listNetworks().networks).toHaveLength(16);
+  it("returns 26 networks (13 mainnet + 13 testnet)", () => {
+    expect(listNetworks().networks).toHaveLength(26);
   });
   it("includes CAIP-2 and asset_id", () => {
     const out = listNetworks();
@@ -577,7 +593,7 @@ describe("generateMppChallenge", () => {
       parseGenerateMppChallenge({
         resource_id: "kb",
         amount_microunits: 10_000,
-        networks: ["solana_mainnet"],
+        networks: ["ethereum_mainnet"],
       })
     ).toThrow(ValidationError);
   });
@@ -781,5 +797,68 @@ describe("verifyAp2Payment", () => {
     expect(() =>
       parseVerifyAp2Payment({ mandate_id: "a".repeat(16), tx_id: "TX1", network: "bitcoin" })
     ).toThrow(ValidationError);
+  });
+});
+
+// ── compliance_trust_query + MPP subscription parsers ─────────────────────────
+
+describe("new tool parsers", () => {
+  it("compliance_trust_query accepts a receipts array", () => {
+    const out = parseComplianceTrustQuery({ receipts: [{ screen_result: "ALLOW" }] });
+    expect(out.receipts).toHaveLength(1);
+  });
+  it("compliance_trust_query defaults to empty receipts", () => {
+    expect(parseComplianceTrustQuery({}).receipts).toEqual([]);
+  });
+  it("compliance_trust_query rejects non-object receipt items", () => {
+    expect(() => parseComplianceTrustQuery({ receipts: ["nope"] })).toThrow(ValidationError);
+  });
+  it("compliance_trust_query rejects >50 receipts", () => {
+    const many = Array.from({ length: 51 }, () => ({}));
+    expect(() => parseComplianceTrustQuery({ receipts: many })).toThrow(ValidationError);
+  });
+  it("try_mpp_subscription requires https url", () => {
+    expect(() => parseTryMppSubscription({ url: "http://x.test/sub" })).toThrow(ValidationError);
+  });
+  it("list_mpp_subscriptions requires tenant_id", () => {
+    expect(() => parseListMppSubscriptions({})).toThrow(ValidationError);
+  });
+  it("cancel_mpp_subscription requires both ids", () => {
+    expect(() => parseCancelMppSubscription({ tenant_id: "t" })).toThrow(ValidationError);
+  });
+});
+
+// ── ALGOVOI_MODE strip (standard vs substrate) ────────────────────────────────
+
+describe("stripSubstrate", () => {
+  it("removes all substrate keys, keeps standard verdict fields", () => {
+    const full = {
+      verdict: "allow",
+      reasons: ["clear"],
+      paid: true,
+      action_ref: "a".repeat(64),
+      compliance_receipt: { screen_result: "ALLOW" },
+      compliance_receipt_jws: "h.p.s",
+      settlement_attestation: { settlement_result: "SETTLED" },
+      settlement_attestation_jws: "h.p.s",
+      composite_hash: "b".repeat(64),
+      ctq_response: { trust_outcome: "TRUSTED" },
+      ctq_response_jws: "h.p.s",
+    };
+    const stripped = stripSubstrate(full) as Record<string, unknown>;
+    expect(stripped.verdict).toBe("allow");
+    expect(stripped.reasons).toEqual(["clear"]);
+    expect(stripped.paid).toBe(true);
+    for (const k of [
+      "action_ref", "compliance_receipt", "compliance_receipt_jws",
+      "settlement_attestation", "settlement_attestation_jws",
+      "composite_hash", "ctq_response", "ctq_response_jws",
+    ]) {
+      expect(stripped[k]).toBeUndefined();
+    }
+  });
+  it("is a no-op on non-objects", () => {
+    expect(stripSubstrate(null)).toBeNull();
+    expect(stripSubstrate("x")).toBe("x");
   });
 });

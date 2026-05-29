@@ -41,6 +41,7 @@ from .idempotency import IdempotencyCache
 from .networks import CAIP2, NETWORK_INFO, NETWORKS, PROTOCOLS
 from .redact import scrub
 from .schemas import (
+    ComplianceTrustQueryInput,
     ConfirmAuthorityInput,
     CreatePaymentLinkInput,
     CreateRecurringAuthorityInput,
@@ -73,6 +74,32 @@ from .schemas import (
 )
 
 MAX_WEBHOOK_BODY = 64 * 1024
+
+# ── Response-model toggle (ALGOVOI_MODE env var) ──────────────────────────────
+#
+# "substrate" (default): tools emit AlgoVoi substrate primitives — action_ref,
+#   Ed25519-signed compliance/settlement/refund/cancellation receipts, and the
+#   composite trust-query hash + signed CtqResponse.
+# "standard": these substrate-only keys are stripped from every tool result,
+#   leaving the bare x402 / MPP / AP2 standard response shape. The underlying
+#   API still returns them (they are additive/optional); the strip is purely a
+#   presentation-layer filter so a caller can A/B the two models live by setting
+#   ALGOVOI_MODE on the server.
+_SUBSTRATE_FIELDS: frozenset[str] = frozenset({
+    "action_ref",
+    "compliance_receipt", "compliance_receipt_jws",
+    "settlement_attestation", "settlement_attestation_jws",
+    "refund_receipt", "refund_receipt_jws",
+    "cancellation_receipt", "cancellation_receipt_jws",
+    "composite_hash", "ctq_response", "ctq_response_jws",
+})
+
+
+def _strip_substrate(result: dict) -> dict:
+    """Remove top-level substrate-only keys for ALGOVOI_MODE=standard."""
+    if not isinstance(result, dict):
+        return result
+    return {k: v for k, v in result.items() if k not in _SUBSTRATE_FIELDS}
 
 # Process-wide idempotency cache — stdio server runs per-client, so this is
 # per Claude Desktop / Cursor session.
@@ -111,12 +138,21 @@ def tool_create_payment_link(client: AlgoVoiClient, args: CreatePaymentLinkInput
 def tool_verify_payment(client: AlgoVoiClient, args: VerifyPaymentInput) -> dict:
     if args.tx_id:
         resp = client.verify_extension_payment(args.token, args.tx_id)
-        verified = resp.get("success") is True
-        return {
+        # /checkout/{token}/verify returns {status: "paid", payment_ledger_id, ...};
+        # older/extension shapes used {success: true}. Accept either so a hosted
+        # checkout verify is reported correctly (was: only checked "success").
+        verified = resp.get("success") is True or resp.get("status") == "paid"
+        result: dict = {
             "paid":   verified,
             "status": "verified" if verified else "unverified",
             "error":  resp.get("error") if not verified else None,
         }
+        # Surface substrate settlement attestation when present (added 2026-05-28).
+        # present only when verified=True and the gateway signing key is provisioned.
+        if resp.get("settlement_attestation"):
+            result["settlement_attestation"]     = resp["settlement_attestation"]
+            result["settlement_attestation_jws"] = resp.get("settlement_attestation_jws")
+        return result
     hosted = client.verify_hosted_return(args.token)
     return {"paid": hosted["paid"], "status": hosted["status"]}
 
@@ -624,6 +660,39 @@ def tool_get_compliance_attestation(
             return json.loads(resp.read())
     except (HTTPError, URLError) as exc:
         return {"error": "attestation_unavailable", "detail": str(exc)}
+
+
+def tool_compliance_trust_query(
+    client: AlgoVoiClient, args: ComplianceTrustQueryInput
+) -> dict:
+    """Composite trust verdict over a chain of substrate receipts.
+
+    Submit decoded compliance receipts, settlement attestations, refund receipts,
+    and/or cancellation receipts. Returns TRUSTED/PROVISIONAL/INSUFFICIENT_EVIDENCE/
+    UNTRUSTED plus a content-addressed composite_hash (deterministic, order-invariant)
+    and a signed CtqResponse with Ed25519 JWS.
+
+    Pass receipts from screen_recipient (compliance_receipt field) and verify_payment
+    (settlement_attestation field) to get a composite trust verdict covering the
+    full pre-payment + post-settlement lifecycle.
+    """
+    url = f"{client.api_base}/compliance/trust-query"
+    body = json.dumps({"receipts": args.receipts}).encode()
+    req = Request(
+        url, data=body,
+        headers={"Content-Type": "application/json", "Accept": "application/json",
+                 "User-Agent": AlgoVoiClient._UA},
+        method="POST",
+    )
+    ctx = ssl.create_default_context()
+    try:
+        with urlopen(req, timeout=30, context=ctx) as resp:
+            return json.loads(resp.read())
+    except HTTPError as exc:
+        body_err = exc.read().decode("utf-8", errors="replace")[:300]
+        return {"error": "trust_query_failed", "status": exc.code, "detail": body_err}
+    except URLError as exc:
+        return {"error": "trust_query_unavailable", "detail": str(exc.reason)}
 
 
 # ── MPP subscription tools (v1.3.0 — tempoxyz/mpp-specs#230 surface) ────────
@@ -1319,6 +1388,36 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "compliance_trust_query",
+        "description": (
+            "Composite trust verdict (TRUSTED / PROVISIONAL / INSUFFICIENT_EVIDENCE / UNTRUSTED) "
+            "over a chain of substrate receipts. Submit decoded receipt objects from "
+            "screen_recipient (compliance_receipt field) and verify_payment "
+            "(settlement_attestation field) to get a composite verdict covering the full "
+            "pre-payment + post-settlement lifecycle. Returns composite_hash (deterministic, "
+            "order-invariant SHA-256 over JCS-sorted rows) and a signed CtqResponse (EdDSA "
+            "Ed25519 JWS). Empty receipts → INSUFFICIENT_EVIDENCE. Any DENY/REVERSED/"
+            "COMPLIANCE_TERMINATED → UNTRUSTED. REFER/PENDING_FINALITY → PROVISIONAL. "
+            "All ALLOW/SETTLED → TRUSTED. No API key required; rate-limited 30/min."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "receipts": {
+                    "type":        "array",
+                    "items":       {"type": "object"},
+                    "description": (
+                        "List of decoded receipt objects. Pass compliance_receipt from "
+                        "screen_recipient and settlement_attestation from verify_payment. "
+                        "Max 50 receipts per call."
+                    ),
+                    "maxItems":    50,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
     # ── MPP subscription lifecycle (v1.3.0 — tempoxyz/mpp-specs#230) ──────────
     {
         "name": "try_mpp_subscription",
@@ -1482,6 +1581,8 @@ def _dispatch(
         result = tool_screen_recipient(client, args)                       # type: ignore[arg-type]
     elif name == "get_compliance_attestation":
         result = tool_get_compliance_attestation(client, args)             # type: ignore[arg-type]
+    elif name == "compliance_trust_query":
+        result = tool_compliance_trust_query(client, args)                 # type: ignore[arg-type]
     elif name == "try_mpp_subscription":
         result = tool_try_mpp_subscription(client, args)                   # type: ignore[arg-type]
     elif name == "list_mpp_subscriptions":
@@ -1490,6 +1591,11 @@ def _dispatch(
         result = tool_cancel_mpp_subscription(client, args)                # type: ignore[arg-type]
     else:
         raise ValueError(f"unknown tool: {name}")
+
+    # ALGOVOI_MODE=standard — strip substrate-only keys so the result matches
+    # the bare x402 / MPP / AP2 standard shape. Default "substrate" passes through.
+    if getattr(client, "mode", "substrate") == "standard":
+        result = _strip_substrate(result)
 
     # §4.2 / §4.4 — redact sensitive keys + truncate long strings
     return scrub(result)
@@ -1583,10 +1689,23 @@ async def run_stdio() -> None:
     webhook_secret = os.environ.get("ALGOVOI_WEBHOOK_SECRET")
     enabled_tools  = _parse_enabled_tools(os.environ.get("MCP_ENABLED_TOOLS"))
 
+    # Response model: substrate (default) | standard. Controls whether tool
+    # results carry AlgoVoi substrate receipts or the bare standard shape.
+    mode = os.environ.get("ALGOVOI_MODE", "substrate").strip().lower()
+    if mode not in ("standard", "substrate"):
+        sys.stderr.write(
+            f"[algovoi-mcp] warning: invalid ALGOVOI_MODE={mode!r} — "
+            "expected 'standard' or 'substrate'; defaulting to 'substrate'\n"
+        )
+        mode = "substrate"
+
     # Per-chain payout addresses. Per-chain vars take priority;
     # ALGOVOI_PAYOUT_ADDRESS acts as a universal fallback.
+    # Testnet-specific vars (_TESTNET / _SEPOLIA / _DEVNET) allow separate
+    # testnet payout wallets; if unset the mainnet address is reused.
     payout_fallback = os.environ.get("ALGOVOI_PAYOUT_ADDRESS", "").strip() or None
     chain_env = [
+        # Mainnet
         ("algorand_mainnet", "ALGOVOI_PAYOUT_ALGORAND"),
         ("voi_mainnet",      "ALGOVOI_PAYOUT_VOI"),
         ("hedera_mainnet",   "ALGOVOI_PAYOUT_HEDERA"),
@@ -1594,18 +1713,44 @@ async def run_stdio() -> None:
         ("base_mainnet",     "ALGOVOI_PAYOUT_BASE"),
         ("solana_mainnet",   "ALGOVOI_PAYOUT_SOLANA"),
         ("tempo_mainnet",    "ALGOVOI_PAYOUT_TEMPO"),
+        # Testnet — dedicated vars; fall back to mainnet sibling if unset
+        ("algorand_testnet", "ALGOVOI_PAYOUT_ALGORAND_TESTNET"),
+        ("voi_testnet",      "ALGOVOI_PAYOUT_VOI_TESTNET"),
+        ("hedera_testnet",   "ALGOVOI_PAYOUT_HEDERA_TESTNET"),
+        ("stellar_testnet",  "ALGOVOI_PAYOUT_STELLAR_TESTNET"),
+        ("base_sepolia",     "ALGOVOI_PAYOUT_BASE_SEPOLIA"),
+        ("solana_devnet",    "ALGOVOI_PAYOUT_SOLANA_DEVNET"),
+        ("tempo_testnet",    "ALGOVOI_PAYOUT_TEMPO_TESTNET"),
+        ("arc_testnet",      "ALGOVOI_PAYOUT_ARC_TESTNET"),
     ]
+    # Mainnet → testnet sibling fallback map
+    _mainnet_sibling = {
+        "algorand_testnet": "algorand_mainnet",
+        "voi_testnet":      "voi_mainnet",
+        "hedera_testnet":   "hedera_mainnet",
+        "stellar_testnet":  "stellar_mainnet",
+        "base_sepolia":     "base_mainnet",
+        "solana_devnet":    "solana_mainnet",
+        "tempo_testnet":    "tempo_mainnet",
+        "arc_testnet":      "base_mainnet",
+    }
     payout_addresses: dict[str, str] = {}
     for key, env_var in chain_env:
         v = (os.environ.get(env_var, "").strip() or None) or payout_fallback
         if v:
             payout_addresses[key] = v
+    # Second pass: fill unset testnet keys from mainnet sibling
+    for testnet_key, mainnet_key in _mainnet_sibling.items():
+        if testnet_key not in payout_addresses and mainnet_key in payout_addresses:
+            payout_addresses[testnet_key] = payout_addresses[mainnet_key]
     if not payout_addresses:
         sys.stderr.write(
             "\n[algovoi-mcp] no payout address configured.\n"
             "Set ALGOVOI_PAYOUT_ALGORAND, ALGOVOI_PAYOUT_VOI, ALGOVOI_PAYOUT_HEDERA,\n"
             "ALGOVOI_PAYOUT_STELLAR, ALGOVOI_PAYOUT_BASE, ALGOVOI_PAYOUT_SOLANA,\n"
-            "ALGOVOI_PAYOUT_TEMPO (or ALGOVOI_PAYOUT_ADDRESS as a universal fallback).\n\n"
+            "ALGOVOI_PAYOUT_TEMPO (or ALGOVOI_PAYOUT_ADDRESS as a universal fallback).\n"
+            "Testnet: ALGOVOI_PAYOUT_ALGORAND_TESTNET, _VOI_TESTNET, _HEDERA_TESTNET,\n"
+            "  _STELLAR_TESTNET, _BASE_SEPOLIA, _SOLANA_DEVNET, _TEMPO_TESTNET, _ARC_TESTNET.\n\n"
         )
         raise SystemExit(2)
 
@@ -1614,13 +1759,14 @@ async def run_stdio() -> None:
         api_key          = api_key,
         tenant_id        = tenant_id,
         payout_addresses = payout_addresses,
+        mode             = mode,
     )
     server = build_server(client, webhook_secret, enabled_tools)
 
     count = len(enabled_tools) if enabled_tools is not None else len(TOOL_SCHEMAS)
     sys.stderr.write(
         f"[algovoi-mcp] connected on stdio — {count} tools ready, "
-        f"webhook_secret={'set' if webhook_secret else 'unset'}\n"
+        f"mode={mode}, webhook_secret={'set' if webhook_secret else 'unset'}\n"
     )
 
     async with stdio_server() as (read, write):

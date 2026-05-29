@@ -62,8 +62,18 @@ def make_client(**overrides) -> AlgoVoiClient:
 # ── Tool schemas (3 tests) ────────────────────────────────────────────────────
 
 class TestToolSchemas:
-    def test_eight_tools(self):
-        assert len(server.TOOL_SCHEMAS) == 11
+    def test_tool_count(self):
+        assert len(server.TOOL_SCHEMAS) == 29
+
+    def test_includes_substrate_and_mpp_sub_tools(self):
+        names = {t["name"] for t in server.TOOL_SCHEMAS}
+        for n in (
+            "compliance_trust_query",
+            "try_mpp_subscription",
+            "list_mpp_subscriptions",
+            "cancel_mpp_subscription",
+        ):
+            assert n in names, f"{n} missing from TOOL_SCHEMAS"
 
     def test_every_schema_shape(self):
         for t in server.TOOL_SCHEMAS:
@@ -107,7 +117,7 @@ class TestPydanticStrict:
         with pytest.raises(ValidationError):
             CreatePaymentLinkInput(
                 amount=1, currency="USD", label="x",
-                network="solana_mainnet",                           # type: ignore[arg-type]
+                network="ethereum_mainnet",                         # type: ignore[arg-type]
             )
 
     def test_idempotency_key_length_bounds(self):
@@ -428,9 +438,9 @@ class TestVerifyWebhook:
 # ── list_networks (2 tests) ───────────────────────────────────────────────────
 
 class TestListNetworks:
-    def test_sixteen_networks(self):
+    def test_network_count(self):
         out = server.tool_list_networks(ListNetworksInput())
-        assert len(out["networks"]) == 16
+        assert len(out["networks"]) == 26
 
     def test_caip2_and_asset_id(self):
         out = server.tool_list_networks(ListNetworksInput())
@@ -481,7 +491,7 @@ class TestGenerateMppChallenge:
             GenerateMppChallengeInput(
                 resource_id="kb",
                 amount_microunits=10_000,
-                networks=["solana_mainnet"],                        # type: ignore[list-item]
+                networks=["ethereum_mainnet"],                      # type: ignore[list-item]
             )
 
     def test_receiver_is_payout_address(self):
@@ -549,7 +559,7 @@ class TestDispatcher:
     def test_list_networks_via_dispatch(self):
         c = make_client()
         out = server._dispatch(c, None, "list_networks", {})
-        assert len(out["networks"]) == 16
+        assert len(out["networks"]) == 26
 
     def test_dispatch_redacts(self):
         c = make_client()

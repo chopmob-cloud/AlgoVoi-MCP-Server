@@ -77,40 +77,42 @@ def skip(msg: str) -> None: print(f"{_SKIP}{msg}")
 
 # --Credential loading --──────────────────────────────────────────────────────
 
-def _load_algovoi_creds() -> dict[str, str] | None:
-    """Try env vars first, then keys.txt in repo root."""
-    api_key  = os.environ.get("ALGOVOI_API_KEY", "")
-    tenant   = os.environ.get("ALGOVOI_TENANT_ID", "")
+_ALGOVOI_VARS = {
+    "ALGOVOI_API_KEY", "ALGOVOI_TENANT_ID",
+    "ALGOVOI_PAYOUT_ALGORAND", "ALGOVOI_PAYOUT_VOI", "ALGOVOI_PAYOUT_HEDERA",
+    "ALGOVOI_PAYOUT_STELLAR", "ALGOVOI_PAYOUT_BASE", "ALGOVOI_PAYOUT_SOLANA",
+    "ALGOVOI_PAYOUT_TEMPO", "ALGOVOI_PAYOUT_ADDRESS",
+}
 
-    if not api_key:
-        repo_root = Path(__file__).parent.parent
-        for fname in ("keys.txt", "openai.txt"):
-            p = repo_root / fname
+def _load_algovoi_creds() -> dict[str, str] | None:
+    """Try env vars first, then KEY=VALUE lines in ~/.secrets/keys.txt or repo root."""
+    # Collect everything from environment first
+    from_env: dict[str, str] = {k: v for k in _ALGOVOI_VARS if (v := os.environ.get(k, "").strip())}
+
+    # Supplement from keys.txt files (KEY=VALUE format)
+    search_dirs = [Path.home() / ".secrets", Path(__file__).parent.parent]
+    file_vars: dict[str, str] = {}
+    for d in search_dirs:
+        for fname in ("keys.txt",):
+            p = d / fname
             if not p.exists():
                 continue
-            for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if line.lower().startswith("algovoi:") or line.startswith("algv_"):
-                    api_key = line.split(":", 1)[-1].strip() if ":" in line else line
-                    break
-            if api_key:
-                break
+            for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    k = k.strip()
+                    if k in _ALGOVOI_VARS and k not in file_vars:
+                        file_vars[k] = v.strip()
+        if file_vars:
+            break  # stop after first directory that yields anything
 
-    # Require at least one payout address (per-chain or universal fallback).
-    payout_env: dict[str, str] = {}
-    for key, var in [
-        ("ALGOVOI_PAYOUT_ALGORAND", "ALGOVOI_PAYOUT_ALGORAND"),
-        ("ALGOVOI_PAYOUT_VOI",      "ALGOVOI_PAYOUT_VOI"),
-        ("ALGOVOI_PAYOUT_HEDERA",   "ALGOVOI_PAYOUT_HEDERA"),
-        ("ALGOVOI_PAYOUT_STELLAR",  "ALGOVOI_PAYOUT_STELLAR"),
-        ("ALGOVOI_PAYOUT_BASE",     "ALGOVOI_PAYOUT_BASE"),
-        ("ALGOVOI_PAYOUT_SOLANA",   "ALGOVOI_PAYOUT_SOLANA"),
-        ("ALGOVOI_PAYOUT_TEMPO",    "ALGOVOI_PAYOUT_TEMPO"),
-        ("ALGOVOI_PAYOUT_ADDRESS",  "ALGOVOI_PAYOUT_ADDRESS"),  # fallback
-    ]:
-        v = os.environ.get(var, "").strip()
-        if v:
-            payout_env[key] = v
+    merged = {**file_vars, **from_env}  # env wins over file
+
+    api_key = merged.get("ALGOVOI_API_KEY", "")
+    tenant  = merged.get("ALGOVOI_TENANT_ID", "")
+    payout_env = {k: v for k in _ALGOVOI_VARS - {"ALGOVOI_API_KEY", "ALGOVOI_TENANT_ID"}
+                  if (v := merged.get(k, ""))}
 
     if not (api_key and tenant and payout_env):
         return None
@@ -269,7 +271,7 @@ def run_phase1(session: McpSession, label: str) -> int:
     Returns number of failures."""
     failures = 0
 
-    # 01 — tools/list (25 tools in v1.4.1)
+    # 01 — tools/list (29 tools in v1.7.0)
     tools = session.list_tools()
     names = {t["name"] for t in tools}
     EXPECTED = {
@@ -288,9 +290,13 @@ def run_phase1(session: McpSession, label: str) -> int:
         # Discovery & Compliance
         "try_mpp_endpoint", "discover_resources", "screen_recipient",
         "get_compliance_attestation",
+        # MPP subscriptions (added v1.7.0)
+        "try_mpp_subscription", "list_mpp_subscriptions", "cancel_mpp_subscription",
+        # Substrate compliance (added v1.7.0)
+        "compliance_trust_query",
     }
     if names == EXPECTED:
-        ok(f"[{label}] 01 tools/list — all 25 tools present")
+        ok(f"[{label}] 01 tools/list — all 29 tools present")
     else:
         missing = sorted(EXPECTED - names)
         extra   = sorted(names - EXPECTED)

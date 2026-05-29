@@ -630,6 +630,82 @@ export function parseGetComplianceAttestation(raw: unknown): GetComplianceAttest
   return {};
 }
 
+// ── compliance_trust_query ────────────────────────────────────────────────────
+
+export interface ComplianceTrustQueryInput {
+  receipts: Record<string, unknown>[];
+}
+
+export function parseComplianceTrustQuery(raw: unknown): ComplianceTrustQueryInput {
+  const obj = expectObject(raw);
+  assertKeys(obj, ["receipts"]);
+  const v = obj.receipts;
+  if (v === undefined || v === null) {
+    return { receipts: [] };
+  }
+  if (!Array.isArray(v)) {
+    throw new ValidationError('"receipts" must be an array');
+  }
+  if (v.length > 50) {
+    throw new ValidationError('"receipts" must have at most 50 items');
+  }
+  for (const item of v) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      throw new ValidationError('"receipts" items must be objects');
+    }
+  }
+  return { receipts: v as Record<string, unknown>[] };
+}
+
+// ── MPP subscription lifecycle ────────────────────────────────────────────────
+
+export interface TryMppSubscriptionInput {
+  url: string;
+}
+
+export interface ListMppSubscriptionsInput {
+  tenant_id: string;
+  status?: string;
+  limit?: number;
+}
+
+export interface CancelMppSubscriptionInput {
+  tenant_id: string;
+  subscription_id: string;
+}
+
+export function parseTryMppSubscription(raw: unknown): TryMppSubscriptionInput {
+  const obj = expectObject(raw);
+  assertKeys(obj, ["url"]);
+  const url = requireString(obj, "url", { min: 10, max: 2048 })!;
+  if (!url.startsWith("https://")) {
+    throw new ValidationError('"url" must start with https://');
+  }
+  return { url };
+}
+
+export function parseListMppSubscriptions(raw: unknown): ListMppSubscriptionsInput {
+  const obj = expectObject(raw);
+  assertKeys(obj, ["tenant_id", "status", "limit"]);
+  const out: ListMppSubscriptionsInput = {
+    tenant_id: requireString(obj, "tenant_id", { min: 1, max: 64 })!,
+  };
+  const status = requireString(obj, "status", { min: 1, max: 32, optional: true });
+  if (status) out.status = status;
+  const limit = requireInt(obj, "limit", { ge: 1, le: 200, optional: true });
+  if (limit !== undefined) out.limit = limit;
+  return out;
+}
+
+export function parseCancelMppSubscription(raw: unknown): CancelMppSubscriptionInput {
+  const obj = expectObject(raw);
+  assertKeys(obj, ["tenant_id", "subscription_id"]);
+  return {
+    tenant_id:       requireString(obj, "tenant_id",       { min: 1, max: 64 })!,
+    subscription_id: requireString(obj, "subscription_id", { min: 1, max: 64 })!,
+  };
+}
+
 export const PARSERS = {
   create_payment_link:       parseCreatePaymentLink,
   verify_payment:            parseVerifyPayment,
@@ -659,4 +735,9 @@ export const PARSERS = {
   discover_resources:         parseDiscoverResources,
   screen_recipient:           parseScreenRecipient,
   get_compliance_attestation: parseGetComplianceAttestation,
+  compliance_trust_query:     parseComplianceTrustQuery,
+  // MPP subscription lifecycle
+  try_mpp_subscription:       parseTryMppSubscription,
+  list_mpp_subscriptions:     parseListMppSubscriptions,
+  cancel_mpp_subscription:    parseCancelMppSubscription,
 } as const;

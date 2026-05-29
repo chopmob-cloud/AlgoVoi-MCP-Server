@@ -2,9 +2,9 @@
 
 # algovoi-mcp
 
-MCP server for [AlgoVoi](https://github.com/chopmob-cloud/AlgoVoi-Platform-Adapters) — create crypto payment links, verify payments, and generate MPP / x402 challenges from any MCP client (Claude Desktop, Claude Code, Cursor, Windsurf).
+MCP server for [AlgoVoi](https://github.com/chopmob-cloud/AlgoVoi-Platform-Adapters) — create crypto payment links, verify payments, run compliance screens / trust queries, and generate MPP / x402 challenges from any MCP client (Claude Desktop, Claude Code, Cursor, Windsurf).
 
-Supports **all 16 AlgoVoi networks**: USDC on Algorand, VOI, Hedera, Stellar (mainnet + testnet) and native ALGO, VOI, HBAR, XLM (mainnet + testnet).
+**29 tools** across **all 26 AlgoVoi networks** (13 mainnet + 13 testnet): USDC + native on Algorand, VOI, Hedera, Stellar, Base, Solana, Tempo, and ARC testnet.
 
 ## Install
 
@@ -54,6 +54,14 @@ Sign up for an AlgoVoi tenant at [algovoi.com](https://www.algovoi.co.uk) to get
 | `generate_mpp_challenge` | IETF MPP 402 `WWW-Authenticate` response |
 | `verify_mpp_receipt` | Verify MPP on-chain receipt |
 | `verify_x402_proof` | Verify x402 base64 proof |
+| `screen_recipient` | Pre-payment sanctions / KYB screen (signed compliance receipt) |
+| `compliance_trust_query` | Composite trust verdict over a chain of substrate receipts |
+
+…plus MPP subscription lifecycle, Tier 2 recurring authorities, and AP2 / A2A tools — **29 total**.
+
+### Response model — `ALGOVOI_MODE`
+
+`substrate` (default) returns AlgoVoi signed receipts (`action_ref`, `compliance_receipt`, `settlement_attestation`, composite trust hash + `ctq_response`). `standard` strips those keys, leaving the bare x402 / MPP / AP2 shape. Set `ALGOVOI_MODE=standard` to opt out.
 
 ## Example prompts
 
