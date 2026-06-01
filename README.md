@@ -6,7 +6,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/algovoi-mcp?label=PyPI)](https://pypi.org/project/algovoi-mcp/)
 [![npm](https://img.shields.io/npm/v/@algovoi/mcp-server?label=npm)](https://www.npmjs.com/package/@algovoi/mcp-server)
-[![Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-green)](./LICENSE)
+[![MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Agent Trust Bench](https://img.shields.io/badge/Agent_Trust_Bench-128%2F138_Passed-238636)](https://agent-trust-bench.algovoi.co.uk)
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server that exposes AlgoVoi's payment infrastructure as tools any MCP client can call — Claude Desktop, Claude Code, Cursor, Windsurf, or any other MCP-compatible assistant.
