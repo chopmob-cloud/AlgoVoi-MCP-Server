@@ -3,7 +3,7 @@
   "name": "io.github.chopmob-cloud/algovoi-mcp-server",
   "description": "AlgoVoi crypto payments via MCP: USDC + native on Algorand, VOI, Hedera, Stellar, Base, Solana, Tempo. 29 tools incl. compliance trust queries; selectable substrate/standard response model. ATB-Tested (agent-trust-bench.algovoi.co.uk).",
   "repository": {
-    "url": "https://github.com/chopmob-cloud/AlgoVoi-Platform-Adapters",
+    "url": "https://github.com/chopmob-cloud/algovoi-mcp-server",
     "source": "github"
   },
   "version": "1.7.0",
