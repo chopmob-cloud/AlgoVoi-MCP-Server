@@ -1,7 +1,3 @@
-> **AlgoVoi is available for acquisition** — [docs.algovoi.co.uk/acquisition](https://docs.algovoi.co.uk/acquisition)
-
----
-
 # AlgoVoi MCP Server
 
 [![PyPI](https://img.shields.io/pypi/v/algovoi-mcp?label=PyPI)](https://pypi.org/project/algovoi-mcp/)
